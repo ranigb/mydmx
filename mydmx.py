@@ -15,6 +15,7 @@ class DMXController:
         self.channels_per_fixture = 8
         self.selected_fixtures = set()  # To store selected fixtures
         self.dmx_values = [0] * 512  # Store all DMX values
+        self.master_dimmer = 1.0  # Master dimmer value (0.0 to 1.0)
         
         # Frame management
         self.frames = {}  # Dictionary to store frame values
@@ -32,8 +33,10 @@ class DMXController:
             "NA"
         ]
         
-        # Initialize uDMX connection
+        # Initialize DMX update manager
         self.dmx = UDMX()
+        self.update_manager = DMXUpdateManager(self.dmx)
+        self.update_manager.on_frame_sent = self.update_dmx_layout
         
         # Add shared layout state
         self.shared_fixture_positions = {}
@@ -45,10 +48,6 @@ class DMXController:
         
         # Add dictionary to store selected fixtures for each frame
         self.frame_selections = {}  # Dictionary to store selected fixtures for each frame
-        
-        # Initialize DMX update manager
-        self.update_manager = DMXUpdateManager(self.dmx)
-        self.update_manager.on_frame_sent = self.update_dmx_layout
         
         # Create widgets
         self.create_widgets()
@@ -116,6 +115,27 @@ class DMXController:
                                     angles=self.shared_fixture_angles,
                                     sync_callback=self.sync_layouts)
         self.dmx_layout.grid(row=0, column=0, padx=5, pady=5)
+        
+        # Add master dimmer slider next to DMX output
+        master_dimmer_frame = ttk.Frame(dmx_stage_frame)
+        master_dimmer_frame.grid(row=0, column=1, padx=5, pady=5, sticky="n")
+        
+        ttk.Label(master_dimmer_frame, text="Master Dimmer").grid(row=0, column=0, pady=(0, 5))
+        
+        self.master_dimmer_var = tk.DoubleVar(value=1.0)
+        master_dimmer_slider = ttk.Scale(
+            master_dimmer_frame,
+            from_=0.0,
+            to=1.0,
+            orient="vertical",
+            variable=self.master_dimmer_var,
+            command=self.on_master_dimmer_change
+        )
+        master_dimmer_slider.grid(row=1, column=0, padx=5, pady=5)
+        
+        # Add value label
+        self.master_dimmer_label = ttk.Label(master_dimmer_frame, text="100%")
+        self.master_dimmer_label.grid(row=2, column=0, pady=(5, 0))
         
         # Set callbacks
         self.frame_layout.callback = self.on_fixture_click
@@ -422,15 +442,16 @@ class DMXController:
         if apply_values:
             # Update DMX values and send to output
             self.dmx_values = frame_values.copy()
-            self.dmx.send_frame(self.dmx_values)
+            # Queue the updates through the update manager
+            for i in range(0, len(frame_values), self.channels_per_fixture):
+                values = frame_values[i:i + self.channels_per_fixture]
+                self.update_manager.queue_multi_update(i, values)
             # Update DMX layout visualization
             self.update_dmx_layout(self.dmx_values)
             self.dmx_matches_frame = True
-            print(f"Applied frame '{frame_name}' values to DMX output")
         else:
             # Set flag to indicate DMX values don't match frame values
             self.dmx_matches_frame = False
-            print(f"Loaded frame '{frame_name}' to UI without applying to DMX")
 
     def update_frame_layout(self, values):
         """Update the frame layout with specified values"""
@@ -462,8 +483,6 @@ class DMXController:
             
             # Queue the updates through the update manager
             self.update_manager.queue_multi_update(start_idx, values)
-            
-        print("Applied frame values to DMX output")
 
     def apply_frame(self, frame_name):
         """Apply the current frame's values to the DMX device, but only for selected fixtures"""
@@ -517,8 +536,6 @@ class DMXController:
         
         # Restore fixture selections for this frame
         self.restore_frame_selections(frame_name)
-        
-        print(f"Switched to frame: {frame_name}")
 
     def restore_frame_selections(self, frame_name):
         """Restore the fixture selections for a frame"""
@@ -627,25 +644,22 @@ class DMXController:
     def check_connection(self):
         """Periodically check if the device is still connected"""
         if not self.dmx.device:
-            print("Device disconnected, attempting to reconnect...")
             if self.dmx.reconnect():
-                print("Device reconnected successfully")
                 # Resend current values after reconnection
                 self.resend_all_values()
-            else:
-                print("Reconnection failed, please check the USB connection")
         
         # Schedule next check
         self.root.after(1000, self.check_connection)
         
     def resend_all_values(self):
-        """Resend all current values after reconnection"""
+        """Resend all current values after reconnection or master dimmer change"""
         # Queue all current values through the update manager
         for i in range(0, len(self.dmx_values), self.channels_per_fixture):
             values = self.dmx_values[i:i + self.channels_per_fixture]
             self.update_manager.queue_multi_update(i, values)
 
     def cleanup(self):
+        """Clean up resources when closing the application"""
         if self.dmx:
             self.dmx.cleanup()
 
@@ -723,13 +737,16 @@ class DMXController:
         """Process DMX updates and handle fade operations"""
         updated, new_values = self.update_manager.process_updates(self.dmx_values)
         if updated and new_values:
-            # Update DMX values only when actually sent to the device
+            # Update DMX values
             self.dmx_values = new_values.copy()
+            
+            # Apply master dimmer only at the final output stage
+            dimmed_values = [int(v * self.master_dimmer) for v in self.dmx_values]
             
             # Update the DMX layout if not in a fade and callback is set
             fade_in_progress = self._fade_in_progress and self._fade_state is not None
             if not fade_in_progress and self.update_manager.on_frame_sent:
-                self.update_manager.on_frame_sent(new_values)
+                self.update_manager.on_frame_sent(dimmed_values)
 
         self.root.after(10, self.update_dmx_output)
 
@@ -764,8 +781,6 @@ class DMXController:
         if steps < 1:
             steps = 1
             
-        print(f"Starting fade over {fade_time} seconds with {steps} steps")
-            
         # Store start values (current DMX output) and target values (from current frame)
         start_values = {}
         target_values = {}
@@ -784,20 +799,9 @@ class DMXController:
             for i in range(self.channels_per_fixture):
                 if abs(start_values[fixture][i] - target_values[fixture][i]) > 0:
                     has_changes = True
-                    
-                    # Log significant changes for debugging
-                    if i in [0, 1, 2, 3, 4]:  # Only log important channels (dimmer, RGB, white)
-                        ch_name = self.channel_labels[i]
-                        delta = target_values[fixture][i] - start_values[fixture][i]
-                        print(f"Fixture {fixture+1}, {ch_name}: {start_values[fixture][i]} → {target_values[fixture][i]}, Delta: {delta}")
-            
-            # Log the RGB values for debugging
-            print(f"Fixture {fixture+1} start: R:{start_values[fixture][1]} G:{start_values[fixture][2]} B:{start_values[fixture][3]} W:{start_values[fixture][4]}")
-            print(f"Fixture {fixture+1} target: R:{target_values[fixture][1]} G:{target_values[fixture][2]} B:{target_values[fixture][3]} W:{target_values[fixture][4]}")
         
         # If there are no changes to make, just return
         if not has_changes:
-            print("No changes detected between DMX output and frame values. Skipping fade.")
             return
             
         # Start the fade
@@ -837,7 +841,6 @@ class DMXController:
         
         if current_step > total_steps:
             # Fade complete
-            print(f"Fade complete after {current_step} steps")
             self.fade_button.config(state="normal")
             self._fade_in_progress = False
             self._fade_state = None
@@ -877,10 +880,6 @@ class DMXController:
         selected_fixtures = fade["selected_fixtures"]
         total_steps = fade["steps"]
         
-        # Debug print for tracking
-        if step % 5 == 0 or step == total_steps:  # Print every 5 steps and the final step
-            print(f"Processing fade step {step} of {total_steps}")
-            
         # Process each selected fixture
         for fixture in selected_fixtures:
             # Get start and target values for this fixture
@@ -917,10 +916,6 @@ class DMXController:
             w = current_values[4]  # White channel
             color = f'#{r:02x}{g:02x}{b:02x}'
             
-            # Debug print for a sample fixture
-            if fixture == selected_fixtures[0] and (step % 5 == 0 or step == total_steps):
-                print(f"  Step {step}: Fixture {fixture+1} - RGB({r},{g},{b}) W:{w} - Color: {color}")
-            
             # DIRECT update to DMX layout visualization
             try:
                 # Update DMX layout (output visualization)
@@ -933,7 +928,7 @@ class DMXController:
                         elif self.dmx_layout.type(item) == 'polygon':
                             self.dmx_layout.itemconfig(item, fill=color)
             except Exception as e:
-                print(f"Error updating DMX layout: {e}")
+                pass
         
         # Force UI update to ensure visualization is updated
         self.root.update()
@@ -951,6 +946,21 @@ class DMXController:
                 values = [self.dmx_values[start_idx + ch] for ch in range(self.channels_per_fixture)]
                 self.update_manager.queue_multi_update(start_idx, values)
         self.root.after(50, self.periodic_live_track_update)  # 20Hz, safe for UI, DMX throttled to 10Hz
+
+    def on_master_dimmer_change(self, value):
+        """Handle master dimmer slider changes"""
+        try:
+            # Convert slider value to float and update master dimmer
+            self.master_dimmer = float(value)
+            
+            # Update label with percentage
+            percentage = int(self.master_dimmer * 100)
+            self.master_dimmer_label.configure(text=f"{percentage}%")
+            
+            # Resend current values with new master dimmer
+            self.resend_all_values()
+        except ValueError:
+            pass
 
 if __name__ == "__main__":
     root = tk.Tk()
