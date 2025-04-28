@@ -364,4 +364,55 @@ class StageLayout(tk.Canvas):
             
         # Create new fixture at updated position
         color = self.fixture_colors.get(fixture_num, 'gray')
-        self.create_fixture(fixture_num, x, y, angle, color) 
+        self.create_fixture(fixture_num, x, y, angle, color)
+
+class MasterDimmer(ttk.Frame):
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
+        
+        # Create label
+        ttk.Label(self, text="Master Dimmer").grid(row=0, column=0, pady=(0, 5))
+        
+        # Create slider
+        self.dimmer_var = tk.DoubleVar(value=1.0)
+        self.slider = ttk.Scale(
+            self,
+            from_=0.0,
+            to=1.0,
+            orient="vertical",
+            variable=self.dimmer_var,
+            command=self._on_slider_change
+        )
+        self.slider.grid(row=1, column=0, padx=5, pady=5)
+        
+        # Create value label
+        self.value_label = ttk.Label(self, text="100%")
+        self.value_label.grid(row=2, column=0, pady=(5, 0))
+        
+        # Initialize callback
+        self.callback = None
+        
+    def _on_slider_change(self, value):
+        """Handle slider changes and call the callback if set"""
+        try:
+            # Convert slider value to float
+            dimmer_value = float(value)
+            
+            # Update label with percentage
+            percentage = int(dimmer_value * 100)
+            self.value_label.configure(text=f"{percentage}%")
+            
+            # Call the callback if set
+            if self.callback:
+                self.callback(dimmer_value)
+        except ValueError:
+            pass
+            
+    def get_value(self):
+        """Get the current dimmer value"""
+        return self.dimmer_var.get()
+        
+    def set_value(self, value):
+        """Set the dimmer value"""
+        self.dimmer_var.set(value)
+        self._on_slider_change(value) 

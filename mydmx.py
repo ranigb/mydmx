@@ -3,7 +3,7 @@ from tkinter import ttk
 from tkinter import simpledialog, messagebox
 import time
 from communication import UDMX, DMXUpdateManager
-from gui import ColorWheel, StageLayout
+from gui import ColorWheel, StageLayout, MasterDimmer
 
 class DMXController:
     def __init__(self, root):
@@ -116,26 +116,10 @@ class DMXController:
                                     sync_callback=self.sync_layouts)
         self.dmx_layout.grid(row=0, column=0, padx=5, pady=5)
         
-        # Add master dimmer slider next to DMX output
-        master_dimmer_frame = ttk.Frame(dmx_stage_frame)
-        master_dimmer_frame.grid(row=0, column=1, padx=5, pady=5, sticky="n")
-        
-        ttk.Label(master_dimmer_frame, text="Master Dimmer").grid(row=0, column=0, pady=(0, 5))
-        
-        self.master_dimmer_var = tk.DoubleVar(value=1.0)
-        master_dimmer_slider = ttk.Scale(
-            master_dimmer_frame,
-            from_=0.0,
-            to=1.0,
-            orient="vertical",
-            variable=self.master_dimmer_var,
-            command=self.on_master_dimmer_change
-        )
-        master_dimmer_slider.grid(row=1, column=0, padx=5, pady=5)
-        
-        # Add value label
-        self.master_dimmer_label = ttk.Label(master_dimmer_frame, text="100%")
-        self.master_dimmer_label.grid(row=2, column=0, pady=(5, 0))
+        # Add master dimmer next to DMX output
+        self.master_dimmer = MasterDimmer(dmx_stage_frame)
+        self.master_dimmer.grid(row=0, column=1, padx=5, pady=5, sticky="n")
+        self.master_dimmer.callback = self.on_master_dimmer_change
         
         # Set callbacks
         self.frame_layout.callback = self.on_fixture_click
@@ -737,16 +721,13 @@ class DMXController:
         """Process DMX updates and handle fade operations"""
         updated, new_values = self.update_manager.process_updates(self.dmx_values)
         if updated and new_values:
-            # Update DMX values
-            self.dmx_values = new_values.copy()
-            
-            # Apply master dimmer only at the final output stage
-            dimmed_values = [int(v * self.master_dimmer) for v in self.dmx_values]
+            # Update DMX values with the original values (not the dimmed ones)
+            self.dmx_values = self.update_manager.original_values.copy()
             
             # Update the DMX layout if not in a fade and callback is set
             fade_in_progress = self._fade_in_progress and self._fade_state is not None
             if not fade_in_progress and self.update_manager.on_frame_sent:
-                self.update_manager.on_frame_sent(dimmed_values)
+                self.update_manager.on_frame_sent(new_values)
 
         self.root.after(10, self.update_dmx_output)
 
@@ -949,18 +930,13 @@ class DMXController:
 
     def on_master_dimmer_change(self, value):
         """Handle master dimmer slider changes"""
-        try:
-            # Convert slider value to float and update master dimmer
-            self.master_dimmer = float(value)
-            
-            # Update label with percentage
-            percentage = int(self.master_dimmer * 100)
-            self.master_dimmer_label.configure(text=f"{percentage}%")
-            
-            # Resend current values with new master dimmer
-            self.resend_all_values()
-        except ValueError:
-            pass
+        # Update master dimmer value in the update manager
+        self.update_manager.set_master_dimmer(value)
+        
+        # Force a resend of all current values
+        for i in range(0, len(self.dmx_values), self.channels_per_fixture):
+            values = self.dmx_values[i:i + self.channels_per_fixture]
+            self.update_manager.queue_multi_update(i, values)
 
 if __name__ == "__main__":
     root = tk.Tk()

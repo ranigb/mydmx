@@ -56,6 +56,8 @@ class DMXUpdateManager:
         self.last_update_time = 0
         self.update_interval = 0.1  # 100ms = 10Hz
         self.on_frame_sent = None
+        self.master_dimmer = 1.0  # Master dimmer value (0.0 to 1.0)
+        self.original_values = [0] * 512  # Store original values before dimming
 
     def queue_update(self, channel, value):
         """Queue a single channel update"""
@@ -85,17 +87,30 @@ class DMXUpdateManager:
                 if value is not None:
                     frame_to_send[i] = value
             
-            # Send the frame
-            if self.dmx.send_frame(frame_to_send):
+            # Store original values before dimming
+            self.original_values = frame_to_send.copy()
+            
+            # Apply master dimmer to the frame for output only
+            dimmed_frame = [int(v * self.master_dimmer) for v in frame_to_send]
+            
+            # Send the dimmed frame
+            if self.dmx.send_frame(dimmed_frame):
                 self.last_update_time = current_time
-                # Copy pending changes to current values
+                # Copy pending changes to current values (without dimming)
                 for i, value in enumerate(self.pending_values):
                     if value is not None:
                         current_values[i] = value
                 self.pending_values = None
-                # Call the callback here
+                # Call the callback with the dimmed frame
                 if self.on_frame_sent:
-                    self.on_frame_sent(frame_to_send)
-                return True, frame_to_send
+                    self.on_frame_sent(dimmed_frame)
+                return True, dimmed_frame
         
-        return False, None 
+        return False, None
+
+    def set_master_dimmer(self, value):
+        """Set the master dimmer value"""
+        self.master_dimmer = value
+        # Force an update with the new dimmer value
+        if self.pending_values is None:
+            self.pending_values = self.original_values.copy() 
