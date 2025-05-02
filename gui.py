@@ -653,6 +653,7 @@ class DMXControllerGUI(ttk.Frame):
 
         # Create sliders for each channel
         self.channel_values = []
+        self.channel_selections = []  # Store channel selection states
         self.create_channel_controls(channel_frame)
         
         # Create color wheel frame
@@ -712,14 +713,31 @@ class DMXControllerGUI(ttk.Frame):
             widget.destroy()
         
         self.channel_values = []
+        self.channel_selections = []  # Store channel selection states
         
         # Get the maximum number of channels from fixtures
         max_channels = max((f.num_channels for f in self.dmx_controller.fixtures), default=8)
         
         # Create sliders for each channel in the correct order
         for i in range(max_channels):
+            # Create frame for this channel's controls
+            channel_frame = ttk.Frame(parent)
+            channel_frame.grid(row=i, column=0, padx=5, pady=2, sticky="ew")
+            
+            # Add channel selection radio button
+            var = tk.BooleanVar(value=True)  # Default to selected
+            self.channel_selections.append(var)
+            ttk.Checkbutton(
+                channel_frame,
+                text="",
+                variable=var
+            ).grid(row=0, column=0, padx=(0, 5))
+            
+            # Add channel label
             label = self.dmx_controller.default_channel_labels[i] if i < len(self.dmx_controller.default_channel_labels) else f"Channel {i+1}"
-            ttk.Label(parent, text=label).grid(row=i, column=0, padx=5)
+            ttk.Label(channel_frame, text=label).grid(row=0, column=1, padx=5)
+            
+            # Add slider
             value = tk.IntVar()
             self.channel_values.append(value)
             
@@ -734,16 +752,21 @@ class DMXControllerGUI(ttk.Frame):
                 return slider_command
             
             slider = ttk.Scale(
-                parent,
+                channel_frame,
                 from_=0,
                 to=255,
                 orient="horizontal",
                 variable=value,
                 command=create_slider_command(i)
             )
-            slider.grid(row=i, column=1, padx=5, pady=2, sticky="ew")
-            value_label = ttk.Label(parent, textvariable=value)
-            value_label.grid(row=i, column=2, padx=5) 
+            slider.grid(row=0, column=2, padx=5, sticky="ew")
+            
+            # Add value label
+            value_label = ttk.Label(channel_frame, textvariable=value)
+            value_label.grid(row=0, column=3, padx=5)
+            
+            # Configure column weights for the channel frame
+            channel_frame.grid_columnconfigure(2, weight=1)  # Make slider expand
 
     def on_tap_button(self):
         """Handle tap button clicks to set time unit"""

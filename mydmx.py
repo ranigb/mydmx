@@ -746,7 +746,11 @@ class DMXController:
             start_idx = self.fixtures[fixture].start_address - 1
             values = []
             for channel in range(self.fixtures[fixture].num_channels):
-                values.append(self.frames[self.current_frame][start_idx + channel])
+                # Only include values for selected channels
+                if channel < len(self.gui.channel_selections) and self.gui.channel_selections[channel].get():
+                    values.append(self.frames[self.current_frame][start_idx + channel])
+                else:
+                    values.append(None)  # Use None to indicate no change
             
             # Queue the updates through the update manager
             self.update_manager.queue_multi_update(start_idx, values)
@@ -1115,13 +1119,20 @@ class DMXController:
             # Get current DMX values from actual DMX output
             start_values[fixture] = self.dmx_values[start_idx:start_idx + self.fixtures[fixture].num_channels].copy()
             
-            # Get target values from current frame
-            target_values[fixture] = self.frames[self.current_frame][start_idx:start_idx + self.fixtures[fixture].num_channels].copy()
+            # Get target values from current frame, but only for selected channels
+            target_values[fixture] = []
+            for channel in range(self.fixtures[fixture].num_channels):
+                if channel < len(self.gui.channel_selections) and self.gui.channel_selections[channel].get():
+                    target_values[fixture].append(self.frames[self.current_frame][start_idx + channel])
+                else:
+                    # Keep current value for unselected channels
+                    target_values[fixture].append(self.dmx_values[start_idx + channel])
             
             # Check if there are any differences between start and target values
             for i in range(self.fixtures[fixture].num_channels):
-                if abs(start_values[fixture][i] - target_values[fixture][i]) > 0:
-                    has_changes = True
+                if i < len(self.gui.channel_selections) and self.gui.channel_selections[i].get():
+                    if abs(start_values[fixture][i] - target_values[fixture][i]) > 0:
+                        has_changes = True
         
         # If there are no changes to make, just return
         if not has_changes:
