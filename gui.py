@@ -2,6 +2,9 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import simpledialog, messagebox
 import math
+import time
+from communication import UDMX, DMXUpdateManager
+from fixture import Fixture
 
 class ColorWheel(tk.Canvas):
     def __init__(self, parent, size=200, **kwargs):
@@ -24,10 +27,10 @@ class ColorWheel(tk.Canvas):
             # Convert angle to radians
             rad = math.radians(angle)
             
-            # Calculate color based on angle (HSV to RGB conversion)
-            h = angle / 360.0
-            s = 1.0
-            v = 1.0
+            # Calculate HSV values
+            h = angle / 360.0  # Hue from 0 to 1
+            s = 1.0  # Full saturation
+            v = 1.0  # Full value
             
             # Convert HSV to RGB
             if s == 0.0:
@@ -84,15 +87,18 @@ class ColorWheel(tk.Canvas):
         distance = math.sqrt(dx*dx + dy*dy)
         
         if distance <= self.radius:
-            # Calculate angle
-            angle = math.degrees(math.atan2(dy, dx))
+            # Calculate angle (standard mathematical angle, 0 at right, increasing counterclockwise)
+            angle = math.degrees(math.atan2(-dy, dx))  # Negative dy because y increases downward
             if angle < 0:
                 angle += 360
                 
-            # Calculate RGB values
-            h = angle / 360.0
-            s = 1.0
-            v = 1.0
+            # Calculate dimmer value based on distance (0 at center, 255 at edge)
+            dimmer = int((distance / self.radius) * 255)
+            
+            # Calculate HSV values
+            h = angle / 360.0  # Hue from 0 to 1
+            s = 1.0  # Full saturation
+            v = 1.0  # Full value
             
             # Convert HSV to RGB
             if s == 0.0:
@@ -123,15 +129,15 @@ class ColorWheel(tk.Canvas):
             g = int(g * 255)
             b = int(b * 255)
             
-            # Update RGB sliders
+            # Update RGB sliders and dimmer
             if hasattr(self, 'callback'):
-                self.callback(r, g, b)
+                self.callback(r, g, b, dimmer)
 
 class StageLayout(tk.Canvas):
-    def __init__(self, parent, num_fixtures, positions=None, angles=None, 
+    def __init__(self, parent, fixtures, positions=None, angles=None, 
                  sync_callback=None, **kwargs):
         super().__init__(parent, **kwargs)
-        self.num_fixtures = num_fixtures
+        self.fixtures = fixtures  # List of Fixture objects
         self.fixture_positions = positions if positions is not None else {}
         self.fixture_angles = angles if angles is not None else {}
         self.fixture_colors = {}
@@ -170,7 +176,7 @@ class StageLayout(tk.Canvas):
             
     def create_fixtures(self):
         # Create initial fixture positions
-        for i in range(self.num_fixtures):
+        for i, fixture in enumerate(self.fixtures):
             # Calculate position if not already set
             if i not in self.fixture_positions:
                 row = i // 6
@@ -178,10 +184,13 @@ class StageLayout(tk.Canvas):
                 x = 65 + col * 75  # Increased spacing between columns
                 y = 60 if row == 0 else 190  # Increased vertical separation between rows
                 self.fixture_positions[i] = (x, y)
+                fixture.set_position(x, y)
                 
             if i not in self.fixture_angles:
                 # Set initial angle (90 for top row pointing down, 270 for bottom row pointing up)
-                self.fixture_angles[i] = 90 if i < 6 else 270
+                angle = 90 if i < 6 else 270
+                self.fixture_angles[i] = angle
+                fixture.set_angle(angle)
                 
             x, y = self.fixture_positions[i]
             angle = self.fixture_angles[i]
@@ -203,7 +212,7 @@ class StageLayout(tk.Canvas):
         num_dx = math.cos(rad) * 25
         num_dy = math.sin(rad) * 25
         self.create_text(x + num_dx, y + num_dy, 
-                        text=str(i+1), fill='white', tags=f'fixture_{i}')
+                        text=str(self.fixtures[i].fixture_id), fill='white', tags=f'fixture_{i}')
 
     def create_arrow(self, x, y, angle, color, tags):
         """Create an arrow shape like a one-way road sign"""
@@ -282,6 +291,7 @@ class StageLayout(tk.Canvas):
             # Update fixture angle
             new_angle = (self.fixture_angles[self.rotating] + angle_diff) % 360
             self.fixture_angles[self.rotating] = new_angle
+            self.fixtures[self.rotating].set_angle(new_angle)
             
             # Update rotate start
             self.rotate_start = (event.x, event.y)
@@ -310,7 +320,9 @@ class StageLayout(tk.Canvas):
         num_dy = math.sin(rad) * 25
         
         # Create new number
-        self.create_text(x + num_dx, y + num_dy, text=str(fixture_num+1), fill='white', tags=f'fixture_{fixture_num}')
+        self.create_text(x + num_dx, y + num_dy, 
+                        text=str(self.fixtures[fixture_num].fixture_id), 
+                        fill='white', tags=f'fixture_{fixture_num}')
                     
     def on_drag(self, event):
         if self.dragging is not None:
@@ -323,6 +335,7 @@ class StageLayout(tk.Canvas):
             new_x = x + dx
             new_y = y + dy
             self.fixture_positions[self.dragging] = (new_x, new_y)
+            self.fixtures[self.dragging].set_position(new_x, new_y)
             
             # Update drag start position
             self.drag_start = (event.x, event.y)
@@ -355,6 +368,9 @@ class StageLayout(tk.Canvas):
                         color = f'#{color}'
                     self.itemconfig(item, fill=color)
                     break
+            
+            # Force update of the canvas
+            self.update_idletasks()
 
     def update_fixture_position(self, fixture_num, x, y, angle):
         """Update a fixture's position and angle"""
@@ -416,3 +432,263 @@ class MasterDimmer(ttk.Frame):
         """Set the dimmer value"""
         self.dimmer_var.set(value)
         self._on_slider_change(value) 
+
+class DMXControllerGUI(ttk.Frame):
+    def __init__(self, parent, dmx_controller):
+        super().__init__(parent)
+        self.dmx_controller = dmx_controller
+        self.create_widgets()
+        
+    def create_widgets(self):
+        # Create main container
+        main_frame = ttk.Frame(self)
+        main_frame.grid(row=0, column=0, padx=10, pady=5, sticky="nsew")
+        
+        # Create tab control
+        self.tab_control = ttk.Notebook(main_frame)
+        self.tab_control.grid(row=0, column=0, columnspan=3, sticky="ew")
+        
+        # Bind events for tab control
+        self.tab_control.bind("<Button-3>", self.dmx_controller.show_tab_menu)
+        self.tab_control.bind("<Button-1>", self.dmx_controller.on_tab_press)
+        self.tab_control.bind("<B1-Motion>", self.dmx_controller.on_tab_drag)
+        self.tab_control.bind("<ButtonRelease-1>", self.dmx_controller.on_tab_release)
+        self.tab_control.bind("<<NotebookTabChanged>>", self.dmx_controller.on_tab_changed)
+        
+        # Create stage layouts container frame
+        stage_layouts_frame = ttk.Frame(main_frame)
+        stage_layouts_frame.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+
+        # Create frame layout frame
+        frame_stage_frame = ttk.LabelFrame(stage_layouts_frame, text="Frame Values", padding="10")
+        frame_stage_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        
+        # Create DMX output layout frame
+        dmx_stage_frame = ttk.LabelFrame(stage_layouts_frame, text="DMX Output", padding="10")
+        dmx_stage_frame.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+        
+        # Create stage layout canvases with shared state
+        self.frame_layout = StageLayout(frame_stage_frame, self.dmx_controller.fixtures, 
+                                      width=500, height=250, bg='#333333',
+                                      positions=self.dmx_controller.shared_fixture_positions,
+                                      angles=self.dmx_controller.shared_fixture_angles,
+                                      sync_callback=self.dmx_controller.sync_layouts)
+        self.frame_layout.grid(row=0, column=0, padx=5, pady=5)
+        
+        self.dmx_layout = StageLayout(dmx_stage_frame, self.dmx_controller.fixtures, 
+                                    width=500, height=250, bg='#333333',
+                                    positions=self.dmx_controller.shared_fixture_positions,
+                                    angles=self.dmx_controller.shared_fixture_angles,
+                                    sync_callback=self.dmx_controller.sync_layouts)
+        self.dmx_layout.grid(row=0, column=0, padx=5, pady=5)
+        
+        # Add master dimmer next to DMX output
+        self.master_dimmer = MasterDimmer(dmx_stage_frame)
+        self.master_dimmer.grid(row=0, column=1, padx=5, pady=5, sticky="n")
+        self.master_dimmer.callback = self.dmx_controller.on_master_dimmer_change
+        
+        # Set callbacks
+        self.frame_layout.callback = self.dmx_controller.on_fixture_click
+        self.dmx_layout.callback = self.dmx_controller.on_fixture_click
+        
+        # Create left frame for fixture selection and configuration
+        left_frame = ttk.Frame(main_frame)
+        left_frame.grid(row=1, column=1, padx=5, pady=5, sticky="nsew")
+        
+        # Create fixture configuration frame
+        fixture_config_frame = ttk.LabelFrame(left_frame, text="Fixture Configuration", padding="10")
+        fixture_config_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        
+        # Add Configure Fixtures button
+        self.configure_button = ttk.Button(
+            fixture_config_frame,
+            text="Configure Fixtures",
+            command=self.dmx_controller.show_fixture_config
+        )
+        self.configure_button.grid(row=0, column=0, padx=5, pady=5)
+        
+        # Create fixture selection frame
+        fixture_frame = ttk.LabelFrame(left_frame, text="Fixture Selection", padding="10")
+        fixture_frame.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+        self.fixture_frame = fixture_frame  # Store reference to fixture frame
+        
+        # Add selection buttons at the top of the fixture frame
+        self.selection_buttons_frame = ttk.Frame(fixture_frame)
+        self.selection_buttons_frame.grid(row=0, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
+        
+        # Add Select All button
+        self.select_all_button = ttk.Button(
+            self.selection_buttons_frame, 
+            text="Select All", 
+            command=self.dmx_controller.toggle_select_all
+        )
+        self.select_all_button.grid(row=0, column=0, padx=5, pady=5)
+        
+        # Add Clear Selection button
+        self.clear_selection_button = ttk.Button(
+            self.selection_buttons_frame, 
+            text="Clear Selection", 
+            command=self.dmx_controller.clear_selection
+        )
+        self.clear_selection_button.grid(row=0, column=1, padx=5, pady=5)
+        
+        # Create fixture checkbuttons and color indicators
+        self.fixture_vars = []
+        self.color_indicators = []
+        self.create_fixture_controls(fixture_frame)
+        
+        # Create control buttons frame BELOW fixture selection
+        control_buttons_frame = ttk.Frame(left_frame)
+        control_buttons_frame.grid(row=2, column=0, padx=5, pady=5, sticky="ew")
+
+        # Add Apply button
+        self.apply_button = ttk.Button(
+            control_buttons_frame, 
+            text="Apply", 
+            command=self.dmx_controller.apply_current_values
+        )
+        self.apply_button.grid(row=0, column=0, padx=5)
+
+        # Add Live Track checkbox
+        self.live_track = tk.BooleanVar(value=False)
+        self.live_track_cb = ttk.Checkbutton(
+            control_buttons_frame,
+            text="Live Track",
+            variable=self.live_track
+        )
+        self.live_track_cb.grid(row=0, column=1, padx=5)
+
+        # Add Fade In controls (new row)
+        fade_frame = ttk.Frame(control_buttons_frame)
+        fade_frame.grid(row=1, column=0, columnspan=2, padx=5, pady=(5,0), sticky="ew")
+
+        # Add Fade In button
+        self.fade_button = ttk.Button(
+            fade_frame,
+            text="Fade In",
+            command=self.dmx_controller.fade_in_values
+        )
+        self.fade_button.grid(row=0, column=0, padx=5)
+
+        # Add Fade Time slider
+        self.fade_time = tk.DoubleVar(value=2.0)  # Default 2 seconds
+        fade_slider = ttk.Scale(
+            fade_frame,
+            from_=0.1,
+            to=10.0,
+            orient="horizontal",
+            variable=self.fade_time
+        )
+        fade_slider.grid(row=0, column=1, padx=5, sticky="ew")
+
+        # Add Fade Time label
+        self.fade_time_label = ttk.Label(fade_frame, text="2.0s")
+        self.fade_time_label.grid(row=0, column=2, padx=5)
+
+        # Update fade time label when slider changes
+        def update_fade_label(val):
+            self.fade_time_label.configure(text=f"{float(val):.1f}s")
+        fade_slider.configure(command=update_fade_label)
+
+        # Create right frame for controls
+        right_frame = ttk.Frame(main_frame)
+        right_frame.grid(row=1, column=2, padx=5, pady=5, sticky="nsew")
+        
+        # Create channel control frame
+        channel_frame = ttk.LabelFrame(right_frame, text="Channel Controls", padding="10")
+        channel_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        self.channel_frame = channel_frame  # Store reference to channel frame
+
+        # Create sliders for each channel
+        self.channel_values = []
+        self.create_channel_controls(channel_frame)
+        
+        # Create color wheel frame
+        color_frame = ttk.LabelFrame(right_frame, text="Color Wheel", padding="10")
+        color_frame.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+        
+        # Create color wheel
+        self.color_wheel = ColorWheel(color_frame, size=200)
+        self.color_wheel.grid(row=0, column=0, padx=5, pady=5)
+        self.color_wheel.callback = self.dmx_controller.update_rgb_from_wheel
+        
+        # Configure grid weights
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        main_frame.grid_rowconfigure(1, weight=1)
+        main_frame.grid_columnconfigure(0, weight=3)
+        main_frame.grid_columnconfigure(1, weight=1)
+        main_frame.grid_columnconfigure(2, weight=1)
+
+    def create_fixture_controls(self, parent):
+        """Create fixture selection controls"""
+        # Clear existing controls except the selection buttons frame
+        for widget in parent.winfo_children():
+            if widget != self.selection_buttons_frame:
+                widget.destroy()
+        
+        self.fixture_vars = []
+        self.color_indicators = []
+        
+        # Create controls for each fixture
+        for i, fixture in enumerate(self.dmx_controller.fixtures):
+            # Create frame for each fixture
+            fixture_item = ttk.Frame(parent)
+            fixture_item.grid(row=i//3 + 1, column=i%3, padx=5, pady=2)  # Start from row 1 to leave space for buttons
+            
+            # Create checkbutton
+            var = tk.BooleanVar()
+            self.fixture_vars.append(var)
+            ttk.Checkbutton(
+                fixture_item, 
+                text=f"Fixture {fixture.fixture_id}",
+                variable=var,
+                command=self.dmx_controller.update_selected_fixtures
+            ).grid(row=0, column=0, padx=2)
+            
+            # Create color indicator
+            color_canvas = tk.Canvas(fixture_item, width=24, height=24, bg='white', highlightthickness=0)
+            color_canvas.grid(row=0, column=1, padx=2)
+            color_canvas.create_rectangle(0, 0, 24, 24, fill='black', outline='black')
+            color_canvas.create_oval(4, 4, 20, 20, fill='black', outline='black')
+            self.color_indicators.append(color_canvas)
+
+    def create_channel_controls(self, parent):
+        """Create channel control sliders"""
+        # Clear existing controls
+        for widget in parent.winfo_children():
+            widget.destroy()
+        
+        self.channel_values = []
+        
+        # Get the maximum number of channels from fixtures
+        max_channels = max((f.num_channels for f in self.dmx_controller.fixtures), default=8)
+        
+        # Create sliders for each channel in the correct order
+        for i in range(max_channels):
+            label = self.dmx_controller.default_channel_labels[i] if i < len(self.dmx_controller.default_channel_labels) else f"Channel {i+1}"
+            ttk.Label(parent, text=label).grid(row=i, column=0, padx=5)
+            value = tk.IntVar()
+            self.channel_values.append(value)
+            
+            def create_slider_command(channel):
+                def slider_command(val):
+                    try:
+                        int_val = int(float(val))
+                        self.channel_values[channel].set(int_val)
+                        self.dmx_controller.on_slider_change(channel)
+                    except ValueError:
+                        pass
+                return slider_command
+            
+            slider = ttk.Scale(
+                parent,
+                from_=0,
+                to=255,
+                orient="horizontal",
+                variable=value,
+                command=create_slider_command(i)
+            )
+            slider.grid(row=i, column=1, padx=5, pady=2, sticky="ew")
+            value_label = ttk.Label(parent, textvariable=value)
+            value_label.grid(row=i, column=2, padx=5) 

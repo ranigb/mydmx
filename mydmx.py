@@ -3,7 +3,8 @@ from tkinter import ttk
 from tkinter import simpledialog, messagebox
 import time
 from communication import UDMX, DMXUpdateManager
-from gui import ColorWheel, StageLayout, MasterDimmer
+from gui import DMXControllerGUI
+from fixture import Fixture
 
 class DMXController:
     def __init__(self, root):
@@ -11,8 +12,40 @@ class DMXController:
         self.root.title("DMX Light Controller (uDMX)")
         
         # DMX Configuration
-        self.num_fixtures = 12
-        self.channels_per_fixture = 8
+        self.fixtures = []  # List of Fixture objects
+        
+        # Define channel mappings (0-based index)
+        self.CHANNEL_DIMMER = 0  # Channel 1
+        self.CHANNEL_RED = 1     # Channel 2
+        self.CHANNEL_GREEN = 2   # Channel 3
+        self.CHANNEL_BLUE = 3    # Channel 4
+        self.CHANNEL_WHITE = 4    # Channel 5
+        self.CHANNEL_STROBE = 5   # Channel 6
+        self.CHANNEL_CHASER = 6   # Channel 7
+        self.CHANNEL_NA = 7       # Channel 8
+        
+        # Channel labels (default for RGB fixtures)
+        self.default_channel_labels = [
+            "Dimmer",  # Channel 1
+            "Red",     # Channel 2
+            "Green",   # Channel 3
+            "Blue",    # Channel 4
+            "White",   # Channel 5
+            "Strobe",  # Channel 6
+            "Chasser", # Channel 7
+            "NA"       # Channel 8
+        ]
+        
+        # Create some default fixtures
+        for i in range(12):  # Create 12 default fixtures
+            fixture = Fixture(
+                fixture_id=i+1,
+                start_address=i*8+1,  # Each fixture starts 8 channels after the previous
+                num_channels=8,  # Default 8 channels per fixture
+                position=(0, 0),  # Will be set by layout
+                angle=0  # Will be set by layout
+            )
+            self.fixtures.append(fixture)
         self.selected_fixtures = set()  # To store selected fixtures
         self.dmx_values = [0] * 512  # Store all DMX values
         self.master_dimmer = 1.0  # Master dimmer value (0.0 to 1.0)
@@ -20,18 +53,6 @@ class DMXController:
         # Frame management
         self.frames = {}  # Dictionary to store frame values
         self.current_frame = None  # Initialize current_frame
-        
-        # Channel labels
-        self.channel_labels = [
-            "Dimmer",
-            "Red",
-            "Green",
-            "Blue",
-            "White",
-            "Strobe",
-            "Chasser",
-            "NA"
-        ]
         
         # Initialize DMX update manager
         self.dmx = UDMX()
@@ -49,8 +70,13 @@ class DMXController:
         # Add dictionary to store selected fixtures for each frame
         self.frame_selections = {}  # Dictionary to store selected fixtures for each frame
         
-        # Create widgets
-        self.create_widgets()
+        # Create GUI
+        self.gui = DMXControllerGUI(root, self)
+        self.gui.grid(row=0, column=0, sticky="nsew")  # Make GUI fill the window
+        
+        # Configure root window grid
+        root.grid_rowconfigure(0, weight=1)
+        root.grid_columnconfigure(0, weight=1)
         
         # Create initial frame and set it as current
         self.create_frame_tab("Frame 1")
@@ -102,14 +128,14 @@ class DMXController:
         dmx_stage_frame.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
         
         # Create stage layout canvases with shared state
-        self.frame_layout = StageLayout(frame_stage_frame, self.num_fixtures, 
+        self.frame_layout = StageLayout(frame_stage_frame, self.fixtures, 
                                       width=500, height=250, bg='#333333',
                                       positions=self.shared_fixture_positions,
                                       angles=self.shared_fixture_angles,
                                       sync_callback=self.sync_layouts)
         self.frame_layout.grid(row=0, column=0, padx=5, pady=5)
         
-        self.dmx_layout = StageLayout(dmx_stage_frame, self.num_fixtures, 
+        self.dmx_layout = StageLayout(dmx_stage_frame, self.fixtures, 
                                     width=500, height=250, bg='#333333',
                                     positions=self.shared_fixture_positions,
                                     angles=self.shared_fixture_angles,
@@ -125,13 +151,26 @@ class DMXController:
         self.frame_layout.callback = self.on_fixture_click
         self.dmx_layout.callback = self.on_fixture_click
         
-        # Create left frame for fixture selection
+        # Create left frame for fixture selection and configuration
         left_frame = ttk.Frame(main_frame)
         left_frame.grid(row=1, column=1, padx=5, pady=5, sticky="nsew")
+        
+        # Create fixture configuration frame
+        fixture_config_frame = ttk.LabelFrame(left_frame, text="Fixture Configuration", padding="10")
+        fixture_config_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        
+        # Add Configure Fixtures button
+        self.configure_button = ttk.Button(
+            fixture_config_frame,
+            text="Configure Fixtures",
+            command=self.show_fixture_config
+        )
+        self.configure_button.grid(row=0, column=0, padx=5, pady=5)
         
         # Create fixture selection frame
         fixture_frame = ttk.LabelFrame(left_frame, text="Fixture Selection", padding="10")
         fixture_frame.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+        self.fixture_frame = fixture_frame  # Store reference to fixture frame
         
         # Add selection buttons at the top of the fixture frame
         selection_buttons_frame = ttk.Frame(fixture_frame)
@@ -143,7 +182,7 @@ class DMXController:
             text="Select All", 
             command=self.toggle_select_all
         )
-        self.select_all_button.grid(row=0, column=0, padx=5)
+        self.select_all_button.grid(row=0, column=0, padx=5, pady=5)
         
         # Add Clear Selection button
         self.clear_selection_button = ttk.Button(
@@ -151,34 +190,12 @@ class DMXController:
             text="Clear Selection", 
             command=self.clear_selection
         )
-        self.clear_selection_button.grid(row=0, column=1, padx=5)
+        self.clear_selection_button.grid(row=0, column=1, padx=5, pady=5)
         
         # Create fixture checkbuttons and color indicators
         self.fixture_vars = []
         self.color_indicators = []
-        for i in range(self.num_fixtures):
-            # Create frame for each fixture
-            fixture_item = ttk.Frame(fixture_frame)
-            fixture_item.grid(row=i//3 + 1, column=i%3, padx=5, pady=2)  # Added +1 to row to account for buttons
-            
-            # Create checkbutton
-            var = tk.BooleanVar()
-            self.fixture_vars.append(var)
-            ttk.Checkbutton(
-                fixture_item, 
-                text=f"Fixture {i+1}",
-                variable=var,
-                command=self.update_selected_fixtures
-            ).grid(row=0, column=0, padx=2)
-            
-            # Create color indicator (circle with white intensity square)
-            color_canvas = tk.Canvas(fixture_item, width=24, height=24, bg='white', highlightthickness=0)
-            color_canvas.grid(row=0, column=1, padx=2)
-            # Create the white intensity square
-            color_canvas.create_rectangle(0, 0, 24, 24, fill='black', outline='black')
-            # Create the color circle
-            color_canvas.create_oval(4, 4, 20, 20, fill='black', outline='black')
-            self.color_indicators.append(color_canvas)
+        self.create_fixture_controls(fixture_frame)
         
         # Create control buttons frame BELOW fixture selection
         control_buttons_frame = ttk.Frame(left_frame)
@@ -240,11 +257,64 @@ class DMXController:
         # Create channel control frame
         channel_frame = ttk.LabelFrame(right_frame, text="Channel Controls", padding="10")
         channel_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        self.channel_frame = channel_frame  # Store reference to channel frame
 
         # Create sliders for each channel
         self.channel_values = []
-        for i in range(self.channels_per_fixture):
-            ttk.Label(channel_frame, text=f"{self.channel_labels[i]}").grid(row=i, column=0, padx=5)
+        self.create_channel_controls(channel_frame)
+        
+        # Create color wheel frame
+        color_frame = ttk.LabelFrame(right_frame, text="Color Wheel", padding="10")
+        color_frame.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+
+    def create_fixture_controls(self, parent):
+        """Create fixture selection controls"""
+        # Clear existing controls
+        for widget in parent.winfo_children():
+            if widget not in [self.select_all_button, self.clear_selection_button]:
+                widget.destroy()
+        
+        self.fixture_vars = []
+        self.color_indicators = []
+        
+        # Create controls for each fixture
+        for i, fixture in enumerate(self.fixtures):
+            # Create frame for each fixture
+            fixture_item = ttk.Frame(parent)
+            fixture_item.grid(row=i//3 + 2, column=i%3, padx=5, pady=2)  # Start from row 2 to leave space for buttons
+            
+            # Create checkbutton
+            var = tk.BooleanVar()
+            self.fixture_vars.append(var)
+            ttk.Checkbutton(
+                fixture_item, 
+                text=f"Fixture {fixture.fixture_id}",
+                variable=var,
+                command=self.update_selected_fixtures
+            ).grid(row=0, column=0, padx=2)
+            
+            # Create color indicator
+            color_canvas = tk.Canvas(fixture_item, width=24, height=24, bg='white', highlightthickness=0)
+            color_canvas.grid(row=0, column=1, padx=2)
+            color_canvas.create_rectangle(0, 0, 24, 24, fill='black', outline='black')
+            color_canvas.create_oval(4, 4, 20, 20, fill='black', outline='black')
+            self.color_indicators.append(color_canvas)
+
+    def create_channel_controls(self, parent):
+        """Create channel control sliders"""
+        # Clear existing controls
+        for widget in parent.winfo_children():
+            widget.destroy()
+        
+        self.channel_values = []
+        
+        # Get the maximum number of channels from fixtures
+        max_channels = max((f.num_channels for f in self.fixtures), default=8)
+        
+        # Create sliders for each channel in the correct order
+        for i in range(max_channels):
+            label = self.default_channel_labels[i] if i < len(self.default_channel_labels) else f"Channel {i+1}"
+            ttk.Label(parent, text=label).grid(row=i, column=0, padx=5)
             value = tk.IntVar()
             self.channel_values.append(value)
             
@@ -259,7 +329,7 @@ class DMXController:
                 return slider_command
             
             slider = ttk.Scale(
-                channel_frame,
+                parent,
                 from_=0,
                 to=255,
                 orient="horizontal",
@@ -267,23 +337,228 @@ class DMXController:
                 command=create_slider_command(i)
             )
             slider.grid(row=i, column=1, padx=5, pady=2, sticky="ew")
-            value_label = ttk.Label(channel_frame, textvariable=value)
+            value_label = ttk.Label(parent, textvariable=value)
             value_label.grid(row=i, column=2, padx=5)
+
+    def show_fixture_config(self):
+        """Show fixture configuration dialog"""
+        # Create configuration window
+        config_window = tk.Toplevel(self.root)
+        config_window.title("Configure Fixtures")
+        config_window.geometry("400x500")
         
-        # Create color wheel frame
-        color_frame = ttk.LabelFrame(right_frame, text="Color Wheel", padding="10")
-        color_frame.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+        # Create scrollable frame
+        canvas = tk.Canvas(config_window)
+        scrollbar = ttk.Scrollbar(config_window, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
         
-        # Create color wheel
-        self.color_wheel = ColorWheel(color_frame, size=200)
-        self.color_wheel.grid(row=0, column=0, padx=5, pady=5)
-        self.color_wheel.callback = self.update_rgb_from_wheel
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Add fixtures
+        fixture_frames = []
+        for i, fixture in enumerate(self.fixtures):
+            frame = ttk.LabelFrame(scrollable_frame, text=f"Fixture {fixture.fixture_id}")
+            frame.grid(row=i, column=0, padx=5, pady=5, sticky="ew")
+            
+            # Start address
+            ttk.Label(frame, text="Start Address:").grid(row=0, column=0, padx=5, pady=2)
+            start_var = tk.IntVar(value=fixture.start_address)
+            start_entry = ttk.Entry(frame, textvariable=start_var, width=10)
+            start_entry.grid(row=0, column=1, padx=5, pady=2)
+            
+            # Number of channels
+            ttk.Label(frame, text="Channels:").grid(row=1, column=0, padx=5, pady=2)
+            channels_var = tk.IntVar(value=fixture.num_channels)
+            channels_entry = ttk.Entry(frame, textvariable=channels_var, width=10)
+            channels_entry.grid(row=1, column=1, padx=5, pady=2)
+            
+            fixture_frames.append((frame, start_var, channels_var))
+        
+        # Add buttons
+        button_frame = ttk.Frame(config_window)
+        button_frame.grid(row=1, column=0, padx=5, pady=5)
+        
+        ttk.Button(
+            button_frame,
+            text="Add Fixture",
+            command=lambda: self.add_fixture_config(fixture_frames, scrollable_frame)
+        ).grid(row=0, column=0, padx=5)
+        
+        ttk.Button(
+            button_frame,
+            text="Save",
+            command=lambda: self.save_fixture_config(fixture_frames, config_window)
+        ).grid(row=0, column=1, padx=5)
+        
+        # Pack the scrollable area
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        config_window.grid_rowconfigure(0, weight=1)
+        config_window.grid_columnconfigure(0, weight=1)
+
+    def add_fixture_config(self, fixture_frames, parent):
+        """Add a new fixture configuration"""
+        fixture_id = len(self.fixtures) + 1
+        frame = ttk.LabelFrame(parent, text=f"Fixture {fixture_id}")
+        frame.grid(row=len(fixture_frames), column=0, padx=5, pady=5, sticky="ew")
+        
+        # Start address
+        ttk.Label(frame, text="Start Address:").grid(row=0, column=0, padx=5, pady=2)
+        start_var = tk.IntVar(value=1)
+        start_entry = ttk.Entry(frame, textvariable=start_var, width=10)
+        start_entry.grid(row=0, column=1, padx=5, pady=2)
+        
+        # Number of channels
+        ttk.Label(frame, text="Channels:").grid(row=1, column=0, padx=5, pady=2)
+        channels_var = tk.IntVar(value=8)
+        channels_entry = ttk.Entry(frame, textvariable=channels_var, width=10)
+        channels_entry.grid(row=1, column=1, padx=5, pady=2)
+        
+        fixture_frames.append((frame, start_var, channels_var))
+        
+        # Calculate center position of the canvas
+        canvas_width = self.frame_layout.winfo_width()
+        canvas_height = self.frame_layout.winfo_height()
+        center_x = canvas_width // 2
+        center_y = canvas_height // 2
+        
+        # Create a temporary fixture for the layouts
+        temp_fixture = Fixture(
+            fixture_id=fixture_id,
+            start_address=start_var.get(),
+            num_channels=channels_var.get(),
+            position=(center_x, center_y),
+            angle=0
+        )
+        self.fixtures.append(temp_fixture)
+        
+        # Update layouts with the new fixture
+        self.frame_layout.fixtures = self.fixtures
+        self.dmx_layout.fixtures = self.fixtures
+        
+        # Recreate fixtures in layouts
+        self.frame_layout.delete("all")
+        self.frame_layout.create_grid()
+        self.frame_layout.create_fixtures()
+        
+        self.dmx_layout.delete("all")
+        self.dmx_layout.create_grid()
+        self.dmx_layout.create_fixtures()
+        
+        # Update fixture colors in layouts
+        for i, fixture in enumerate(self.fixtures):
+            start_idx = fixture.start_address - 1
+            r = self.dmx_values[start_idx + 1] if start_idx + 1 < len(self.dmx_values) else 0
+            g = self.dmx_values[start_idx + 2] if start_idx + 2 < len(self.dmx_values) else 0
+            b = self.dmx_values[start_idx + 3] if start_idx + 3 < len(self.dmx_values) else 0
+            w = self.dmx_values[start_idx + 4] if start_idx + 4 < len(self.dmx_values) else 0
+            
+            color = f'#{r:02x}{g:02x}{b:02x}'
+            
+            self.frame_layout.update_fixture_color(i, color, w)
+            self.dmx_layout.update_fixture_color(i, color, w)
+        
+        # Get the canvas that contains the scrollable frame
+        canvas = parent.master
+        
+        # Schedule scrolling after the frame is added and layout is updated
+        def scroll_to_bottom():
+            # Update the scroll region to include the new frame
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            # Scroll to the bottom to show the new fixture
+            canvas.yview_moveto(1.0)
+            # Set focus to the start address entry
+            start_entry.focus_set()
+        
+        # Schedule the scroll after the frame is added and layouts are updated
+        self.root.after(50, scroll_to_bottom)
+
+    def save_fixture_config(self, fixture_frames, window):
+        """Save fixture configuration"""
+        # Create new fixtures list
+        new_fixtures = []
+        for i, (frame, start_var, channels_var) in enumerate(fixture_frames):
+            try:
+                start = start_var.get()
+                channels = channels_var.get()
+                
+                # Validate values
+                if start < 1 or start > 512:
+                    raise ValueError("Start address must be between 1 and 512")
+                if channels < 1 or channels > 512:
+                    raise ValueError("Number of channels must be between 1 and 512")
+                if start + channels - 1 > 512:
+                    raise ValueError("Fixture exceeds DMX universe (512 channels)")
+                
+                # Check for overlapping fixtures
+                for existing in new_fixtures:
+                    if (start <= existing.start_address + existing.num_channels - 1 and
+                        start + channels - 1 >= existing.start_address):
+                        raise ValueError(f"Fixture {i+1} overlaps with Fixture {existing.fixture_id}")
+                
+                # Create new fixture
+                fixture = Fixture(
+                    fixture_id=i+1,
+                    start_address=start,
+                    num_channels=channels,
+                    position=self.fixtures[i].position if i < len(self.fixtures) else (0, 0),
+                    angle=self.fixtures[i].angle if i < len(self.fixtures) else 0
+                )
+                new_fixtures.append(fixture)
+                
+            except ValueError as e:
+                messagebox.showerror("Configuration Error", str(e))
+                return
+        
+        # Update fixtures
+        self.fixtures = new_fixtures
+        
+        # Update UI
+        self.create_fixture_controls(self.fixture_frame)
+        self.create_channel_controls(self.channel_frame)
+        
+        # Update layouts
+        self.frame_layout.fixtures = self.fixtures
+        self.dmx_layout.fixtures = self.fixtures
+        
+        # Recreate fixtures in layouts
+        self.frame_layout.delete("all")  # Clear existing fixtures
+        self.frame_layout.create_grid()  # Recreate grid
+        self.frame_layout.create_fixtures()  # Recreate fixtures
+        
+        self.dmx_layout.delete("all")  # Clear existing fixtures
+        self.dmx_layout.create_grid()  # Recreate grid
+        self.dmx_layout.create_fixtures()  # Recreate fixtures
+        
+        # Update fixture colors in layouts
+        for i, fixture in enumerate(self.fixtures):
+            start_idx = fixture.start_address - 1
+            r = self.dmx_values[start_idx + 1] if start_idx + 1 < len(self.dmx_values) else 0  # Red channel
+            g = self.dmx_values[start_idx + 2] if start_idx + 2 < len(self.dmx_values) else 0  # Green channel
+            b = self.dmx_values[start_idx + 3] if start_idx + 3 < len(self.dmx_values) else 0  # Blue channel
+            w = self.dmx_values[start_idx + 4] if start_idx + 4 < len(self.dmx_values) else 0  # White channel
+            
+            # Convert to hex color with proper formatting
+            color = f'#{r:02x}{g:02x}{b:02x}'
+            
+            # Update fixture colors in both layouts
+            self.frame_layout.update_fixture_color(i, color, w)
+            self.dmx_layout.update_fixture_color(i, color, w)
+        
+        # Close window
+        window.destroy()
 
     def create_frame_tab(self, frame_name):
         """Create a new tab for a frame"""
-        frame = ttk.Frame(self.tab_control)
-        self.tab_control.add(frame, text=frame_name)
-        self.tab_control.select(frame)  # Select the new tab
+        frame = ttk.Frame(self.gui.tab_control)
+        self.gui.tab_control.add(frame, text=frame_name)
+        self.gui.tab_control.select(frame)  # Select the new tab
         
         # Initialize empty selection set for new frame
         self.frame_selections[frame_name] = set()
@@ -291,14 +566,14 @@ class DMXController:
     def show_tab_menu(self, event):
         """Show context menu for tab operations"""
         # Get the clicked tab
-        clicked_tab = self.tab_control.identify(event.x, event.y)
+        clicked_tab = self.gui.tab_control.identify(event.x, event.y)
         if not clicked_tab:
             return
         
         # Get the tab number that was clicked
         try:
-            tab_index = self.tab_control.index('@%d,%d' % (event.x, event.y))
-            frame_name = self.tab_control.tab(tab_index, "text")
+            tab_index = self.gui.tab_control.index('@%d,%d' % (event.x, event.y))
+            frame_name = self.gui.tab_control.tab(tab_index, "text")
             
             # Create context menu
             menu = tk.Menu(self.root, tearoff=0)
@@ -321,7 +596,7 @@ class DMXController:
     def get_frame_name_from_tab(self, tab):
         """Get the frame name from a tab index"""
         try:
-            return self.tab_control.tab(tab, "text")
+            return self.gui.tab_control.tab(tab, "text")
         except:
             return None
 
@@ -333,9 +608,9 @@ class DMXController:
         new_name = simpledialog.askstring("Rename Frame", "Enter new name:", initialvalue=frame_name)
         if new_name and new_name != frame_name:
             # Update tab name
-            for tab in range(self.tab_control.index('end')):
-                if self.tab_control.tab(tab, "text") == frame_name:
-                    self.tab_control.tab(tab, text=new_name)
+            for tab in range(self.gui.tab_control.index('end')):
+                if self.gui.tab_control.tab(tab, "text") == frame_name:
+                    self.gui.tab_control.tab(tab, text=new_name)
                     break
             # Update frames dictionary and selections
             if frame_name in self.frames:
@@ -355,9 +630,9 @@ class DMXController:
             
         if messagebox.askyesno("Delete Frame", f"Are you sure you want to delete frame '{frame_name}'?"):
             # Find and remove the tab
-            for tab in range(self.tab_control.index('end')):
-                if self.tab_control.tab(tab, "text") == frame_name:
-                    self.tab_control.forget(tab)
+            for tab in range(self.gui.tab_control.index('end')):
+                if self.gui.tab_control.tab(tab, "text") == frame_name:
+                    self.gui.tab_control.forget(tab)
                     break
             # Remove from frames dictionary and selections
             if frame_name in self.frames:
@@ -413,11 +688,11 @@ class DMXController:
         frame_values = self.frames[frame_name].copy()
         
         # Update sliders with frame values, but don't send to DMX
-        for fixture in range(self.num_fixtures):
-            start_channel = fixture * self.channels_per_fixture
-            for channel in range(self.channels_per_fixture):
+        for fixture in range(len(self.fixtures)):
+            start_channel = self.fixtures[fixture].start_address - 1
+            for channel in range(self.fixtures[fixture].num_channels):
                 # Update slider values only
-                self.channel_values[channel].set(frame_values[start_channel + channel])
+                self.gui.channel_values[channel].set(frame_values[start_channel + channel])
         
         # Update frame layout visualization
         self.update_frame_layout(frame_values)
@@ -427,9 +702,8 @@ class DMXController:
             # Update DMX values and send to output
             self.dmx_values = frame_values.copy()
             # Queue the updates through the update manager
-            for i in range(0, len(frame_values), self.channels_per_fixture):
-                values = frame_values[i:i + self.channels_per_fixture]
-                self.update_manager.queue_multi_update(i, values)
+            for i in range(len(frame_values)):
+                self.update_manager.queue_update(self.fixtures[i].start_address + i, frame_values[i])
             # Update DMX layout visualization
             self.update_dmx_layout(self.dmx_values)
             self.dmx_matches_frame = True
@@ -439,30 +713,39 @@ class DMXController:
 
     def update_frame_layout(self, values):
         """Update the frame layout with specified values"""
-        for i in range(self.num_fixtures):
-            start_idx = i * self.channels_per_fixture
-            r = values[start_idx + 1]  # Red channel
-            g = values[start_idx + 2]  # Green channel
-            b = values[start_idx + 3]  # Blue channel
-            w = values[start_idx + 4]  # White channel
+        for i in range(len(self.fixtures)):
+            start_idx = self.fixtures[i].start_address - 1
+            # Get values in correct channel order: dimmer, red, green, blue, white
+            dimmer = values[start_idx + self.CHANNEL_DIMMER]  # Dimmer channel (Channel 1)
+            r = values[start_idx + self.CHANNEL_RED]         # Red channel (Channel 2)
+            g = values[start_idx + self.CHANNEL_GREEN]       # Green channel (Channel 3)
+            b = values[start_idx + self.CHANNEL_BLUE]        # Blue channel (Channel 4)
+            w = values[start_idx + self.CHANNEL_WHITE]       # White channel (Channel 5)
+            
+            # Apply dimmer to RGB values for visualization only
+            dimmer_factor = dimmer / 255.0
+            r_vis = int(r * dimmer_factor)
+            g_vis = int(g * dimmer_factor)
+            b_vis = int(b * dimmer_factor)
+            w_vis = int(w * dimmer_factor)
             
             # Convert to hex color with proper formatting
-            color = f'#{r:02x}{g:02x}{b:02x}'
+            color = f'#{r_vis:02x}{g_vis:02x}{b_vis:02x}'
             
             # Update frame layout fixture color
-            self.frame_layout.update_fixture_color(i, color, w)
+            self.gui.frame_layout.update_fixture_color(i, color, w_vis)
 
     def apply_current_values(self):
         """Apply current frame values to DMX output"""
-        selected = {i for i, var in enumerate(self.fixture_vars) if var.get()}
+        selected = {i for i, var in enumerate(self.gui.fixture_vars) if var.get()}
         
         if not selected:
             return
         
         for fixture in selected:
-            start_idx = fixture * self.channels_per_fixture
+            start_idx = self.fixtures[fixture].start_address - 1
             values = []
-            for channel in range(self.channels_per_fixture):
+            for channel in range(self.fixtures[fixture].num_channels):
                 values.append(self.frames[self.current_frame][start_idx + channel])
             
             # Queue the updates through the update manager
@@ -479,30 +762,39 @@ class DMXController:
             
             # Only update DMX values for currently selected fixtures
             for fixture in selected:
-                start_idx = fixture * self.channels_per_fixture
+                start_idx = self.fixtures[fixture].start_address - 1
                 values = []
-                for channel in range(self.channels_per_fixture):
-                    # Copy values from frame to DMX output
-                    self.dmx_values[start_idx + channel] = self.frames[frame_name][start_idx + channel]
-                    values.append(self.frames[frame_name][start_idx + channel])
-                
-                # Queue the updates through the update manager
-                self.update_manager.queue_multi_update(start_idx, values)
+                for channel in range(self.fixtures[fixture].num_channels):
+                    # Get value from frame
+                    value = self.frames[frame_name][start_idx + channel]
+                    # Queue the update through the update manager
+                    self.update_manager.queue_update(start_idx + channel, value)
+                    # Update our local copy after queueing
+                    self.dmx_values[start_idx + channel] = value
 
     def update_dmx_layout(self, values):
         """Update the DMX output layout with current values"""
-        for i in range(self.num_fixtures):
-            start_idx = i * self.channels_per_fixture
-            r = values[start_idx + 1]  # Red channel
-            g = values[start_idx + 2]  # Green channel
-            b = values[start_idx + 3]  # Blue channel
-            w = values[start_idx + 4]  # White channel
+        for i in range(len(self.fixtures)):
+            start_idx = self.fixtures[i].start_address - 1
+            # Get values in correct channel order: dimmer, red, green, blue, white
+            dimmer = values[start_idx + self.CHANNEL_DIMMER]  # Dimmer channel (Channel 1)
+            r = values[start_idx + self.CHANNEL_RED]         # Red channel (Channel 2)
+            g = values[start_idx + self.CHANNEL_GREEN]       # Green channel (Channel 3)
+            b = values[start_idx + self.CHANNEL_BLUE]        # Blue channel (Channel 4)
+            w = values[start_idx + self.CHANNEL_WHITE]       # White channel (Channel 5)
+            
+            # Apply dimmer to RGB values for visualization only
+            dimmer_factor = dimmer / 255.0
+            r_vis = int(r * dimmer_factor)
+            g_vis = int(g * dimmer_factor)
+            b_vis = int(b * dimmer_factor)
+            w_vis = int(w * dimmer_factor)
             
             # Convert to hex color with proper formatting
-            color = f'#{r:02x}{g:02x}{b:02x}'
+            color = f'#{r_vis:02x}{g_vis:02x}{b_vis:02x}'
             
             # Update DMX layout fixture color
-            self.dmx_layout.update_fixture_color(i, color, w)
+            self.gui.dmx_layout.update_fixture_color(i, color, w_vis)
 
     def on_tab_changed(self, event):
         """Handle tab change event"""
@@ -512,8 +804,8 @@ class DMXController:
             self.frame_selections[self.current_frame] = self.selected_fixtures.copy()
         
         # Get the new frame name
-        tab = self.tab_control.select()
-        frame_name = self.tab_control.tab(tab, "text")
+        tab = self.gui.tab_control.select()
+        frame_name = self.gui.tab_control.tab(tab, "text")
         
         # Load the new frame's values without sending to DMX
         self.load_frame(frame_name, apply_values=False)
@@ -527,7 +819,7 @@ class DMXController:
         saved_selections = self.frame_selections.get(frame_name, set())
         
         # Update checkboxes to match saved selections
-        for i, var in enumerate(self.fixture_vars):
+        for i, var in enumerate(self.gui.fixture_vars):
             var.set(i in saved_selections)
         
         # Update selected fixtures set
@@ -535,9 +827,9 @@ class DMXController:
 
     def update_color_indicators(self):
         """Update the color indicators for all fixtures"""
-        for i in range(self.num_fixtures):
+        for i in range(len(self.fixtures)):
             # Get RGB values for this fixture
-            start_idx = i * self.channels_per_fixture
+            start_idx = self.fixtures[i].start_address - 1
             r = self.dmx_values[start_idx + 1]  # Red channel
             g = self.dmx_values[start_idx + 2]  # Green channel
             b = self.dmx_values[start_idx + 3]  # Blue channel
@@ -561,69 +853,100 @@ class DMXController:
             return
 
         for fixture in self.selected_fixtures:
-            start_address = fixture * self.channels_per_fixture
-            channel_value = int(self.channel_values[channel].get())
-            dmx_channel = start_address + channel
+            start_address = self.fixtures[fixture].start_address
+            channel_value = int(self.gui.channel_values[channel].get())
             
-            # Update the frame values
+            # Update the frame values immediately
             if self.current_frame in self.frames:
-                self.frames[self.current_frame][dmx_channel] = channel_value
+                self.frames[self.current_frame][start_address + channel - 1] = channel_value
 
-            # Only send DMX updates if live track is enabled
-            if self.live_track.get():
-                # Only update DMX values when actually sending to the device
-                self.update_manager.queue_update(dmx_channel, channel_value)
+            # Only queue DMX updates if live tracking is enabled
+            if self.gui.live_track.get():
+                self.update_manager.queue_update(start_address + channel - 1, channel_value)
 
-            # Update layout fixture colors
-            start_idx = fixture * self.channels_per_fixture
-            r = self.frames[self.current_frame][start_idx + 1]  # Red channel
-            g = self.frames[self.current_frame][start_idx + 2]  # Green channel
-            b = self.frames[self.current_frame][start_idx + 3]  # Blue channel
-            w = self.frames[self.current_frame][start_idx + 4]  # White channel
+            # Update layout fixture colors for any channel change
+            start_idx = self.fixtures[fixture].start_address - 1
+            # Get values in correct channel order: dimmer, red, green, blue, white
+            dimmer = self.frames[self.current_frame][start_idx + self.CHANNEL_DIMMER]  # Channel 1
+            r = self.frames[self.current_frame][start_idx + self.CHANNEL_RED]         # Channel 2
+            g = self.frames[self.current_frame][start_idx + self.CHANNEL_GREEN]       # Channel 3
+            b = self.frames[self.current_frame][start_idx + self.CHANNEL_BLUE]        # Channel 4
+            w = self.frames[self.current_frame][start_idx + self.CHANNEL_WHITE]       # Channel 5
+            
+            # Apply dimmer to RGB values for visualization only
+            dimmer_factor = dimmer / 255.0
+            r_vis = int(r * dimmer_factor)
+            g_vis = int(g * dimmer_factor)
+            b_vis = int(b * dimmer_factor)
+            w_vis = int(w * dimmer_factor)
             
             # Convert to hex color with proper formatting
-            color = f'#{r:02x}{g:02x}{b:02x}'
+            color = f'#{r_vis:02x}{g_vis:02x}{b_vis:02x}'
             
             # Update fixture colors in both layouts
-            self.frame_layout.update_fixture_color(fixture, color, w)
-            if self.live_track.get():
-                self.dmx_layout.update_fixture_color(fixture, color, w)
+            self.gui.frame_layout.update_fixture_color(fixture, color, w_vis)
+            if self.gui.live_track.get():
+                self.gui.dmx_layout.update_fixture_color(fixture, color, w_vis)
 
-    def update_rgb_from_wheel(self, r, g, b):
-        self.channel_values[1].set(r)  # Red
-        self.channel_values[2].set(b)  # Blue (swapped with Green)
-        self.channel_values[3].set(g)  # Green (swapped with Blue)
+    def update_rgb_from_wheel(self, r, g, b, dimmer):
+        """Update RGB values from color wheel"""
+        # Update channel values (using 0-based indices)
+        # Map RGB values to channels 2-4 (Red, Green, Blue)
+        self.gui.channel_values[self.CHANNEL_RED].set(r)     # Red channel (Channel 2)
+        self.gui.channel_values[self.CHANNEL_GREEN].set(g)   # Green channel (Channel 3)
+        self.gui.channel_values[self.CHANNEL_BLUE].set(b)    # Blue channel (Channel 4)
+        self.gui.channel_values[self.CHANNEL_DIMMER].set(dimmer)  # Dimmer channel (Channel 1)
 
-        for channel in [1, 2, 3]:
-            for fixture in self.selected_fixtures:
-                start_address = fixture * self.channels_per_fixture
-                channel_value = int(self.channel_values[channel].get())
-                dmx_channel = start_address + channel
+        # If no fixtures are selected, return
+        if not self.selected_fixtures:
+            return
 
-                # Update the frame values
-                if self.current_frame in self.frames:
-                    self.frames[self.current_frame][dmx_channel] = channel_value
-
-                # Only send DMX updates if live track is enabled
-                if self.live_track.get():
-                    # Only update DMX values when actually sending to the device
-                    self.update_manager.queue_update(dmx_channel, channel_value)
-
-        # Update fixture colors
+        # Update DMX values for all selected fixtures
         for fixture in self.selected_fixtures:
-            start_idx = fixture * self.channels_per_fixture
-            r = self.frames[self.current_frame][start_idx + 1]  # Red channel
-            g = self.frames[self.current_frame][start_idx + 2]  # Green channel
-            b = self.frames[self.current_frame][start_idx + 3]  # Blue channel
-            w = self.frames[self.current_frame][start_idx + 4]  # White channel
+            start_address = self.fixtures[fixture].start_address
+            # Map RGB channels correctly (using 0-based indices)
+            channel_mapping = {
+                self.CHANNEL_DIMMER: dimmer,  # Dimmer channel (Channel 1)
+                self.CHANNEL_RED: r,     # Red channel (Channel 2)
+                self.CHANNEL_GREEN: g,   # Green channel (Channel 3)
+                self.CHANNEL_BLUE: b     # Blue channel (Channel 4)
+            }
+            
+            # Update each channel in the correct order
+            for channel, value in channel_mapping.items():
+                dmx_channel = start_address + channel - 1  # -1 because DMX is 0-based
+
+                # Update the frame values immediately
+                if self.current_frame in self.frames:
+                    self.frames[self.current_frame][dmx_channel] = value
+
+                # Only queue DMX updates if live tracking is enabled
+                if self.gui.live_track.get():
+                    self.update_manager.queue_update(dmx_channel, value)
+
+            # Update fixture colors
+            start_idx = self.fixtures[fixture].start_address - 1
+            # Get values in correct channel order: dimmer, red, green, blue, white
+            dimmer = self.frames[self.current_frame][start_idx + self.CHANNEL_DIMMER]  # Channel 1
+            r = self.frames[self.current_frame][start_idx + self.CHANNEL_RED]         # Channel 2
+            g = self.frames[self.current_frame][start_idx + self.CHANNEL_GREEN]       # Channel 3
+            b = self.frames[self.current_frame][start_idx + self.CHANNEL_BLUE]        # Channel 4
+            w = self.frames[self.current_frame][start_idx + self.CHANNEL_WHITE]       # Channel 5
+            
+            # Apply dimmer to RGB values for visualization only
+            dimmer_factor = dimmer / 255.0
+            r_vis = int(r * dimmer_factor)
+            g_vis = int(g * dimmer_factor)
+            b_vis = int(b * dimmer_factor)
+            w_vis = int(w * dimmer_factor)
             
             # Convert to hex color with proper formatting
-            color = f'#{r:02x}{g:02x}{b:02x}'
+            color = f'#{r_vis:02x}{g_vis:02x}{b_vis:02x}'
             
             # Update fixture colors in both layouts
-            self.frame_layout.update_fixture_color(fixture, color, w)
-            if self.live_track.get():
-                self.dmx_layout.update_fixture_color(fixture, color, w)
+            self.gui.frame_layout.update_fixture_color(fixture, color, w_vis)
+            if self.gui.live_track.get():
+                self.gui.dmx_layout.update_fixture_color(fixture, color, w_vis)
 
     def check_connection(self):
         """Periodically check if the device is still connected"""
@@ -638,9 +961,8 @@ class DMXController:
     def resend_all_values(self):
         """Resend all current values after reconnection or master dimmer change"""
         # Queue all current values through the update manager
-        for i in range(0, len(self.dmx_values), self.channels_per_fixture):
-            values = self.dmx_values[i:i + self.channels_per_fixture]
-            self.update_manager.queue_multi_update(i, values)
+        for i in range(len(self.dmx_values)):
+            self.update_manager.queue_update(i, self.dmx_values[i])
 
     def cleanup(self):
         """Clean up resources when closing the application"""
@@ -650,25 +972,40 @@ class DMXController:
     def on_fixture_click(self, fixture_num):
         """Handle fixture click in the stage layout"""
         # Update sliders with the fixture's values
-        start_idx = fixture_num * self.channels_per_fixture
-        for i in range(self.channels_per_fixture):
+        start_idx = self.fixtures[fixture_num].start_address - 1
+        for i in range(self.fixtures[fixture_num].num_channels):
             value = self.dmx_values[start_idx + i]
             self.channel_values[i].set(value)
 
     def update_selected_fixtures(self):
         """Update the set of selected fixtures based on checkbox states"""
-        self.selected_fixtures = {i for i, var in enumerate(self.fixture_vars) if var.get()}
+        self.selected_fixtures = {i for i, var in enumerate(self.gui.fixture_vars) if var.get()}
+        
+        # If no fixtures are selected, clear all channel values
+        if not self.selected_fixtures:
+            for value in self.gui.channel_values:
+                value.set(0)
+            return
+
+        # Get the first selected fixture's values to update the sliders
+        first_fixture = next(iter(self.selected_fixtures))
+        start_idx = self.fixtures[first_fixture].start_address - 1
+        
+        # Update sliders with the first fixture's values
+        for i in range(len(self.gui.channel_values)):
+            if start_idx + i < len(self.dmx_values):
+                self.gui.channel_values[i].set(self.dmx_values[start_idx + i])
 
     def on_tab_press(self, event):
         """Handle tab press for reordering"""
         # Get the current tab
-        current_tab = self.tab_control.select()
+        current_tab = self.gui.tab_control.select()
         if current_tab:
             try:
                 self.drag_start = event.x
                 self.drag_tab = current_tab
-                self.drag_tab_index = self.tab_control.index(current_tab)
-                self.drag_tab_name = self.tab_control.tab(current_tab, "text")
+                self.drag_tab_index = self.gui.tab_control.index(current_tab)
+                self.drag_tab_name = self.gui.tab_control.tab(current_tab, "text")
             except:
                 self.drag_start = None
                 self.drag_tab = None
@@ -683,13 +1020,13 @@ class DMXController:
                 
             try:
                 # Get the tab at the current mouse position
-                target_index = self.tab_control.index('@%d,%d' % (event.x, event.y))
+                target_index = self.gui.tab_control.index('@%d,%d' % (event.x, event.y))
                 if target_index != self.drag_tab_index and target_index >= 0:
                     # Get the tab widget
-                    tab = self.tab_control.select()
+                    tab = self.gui.tab_control.select()
                     
                     # Insert the tab at the new position
-                    self.tab_control.insert(target_index, tab)
+                    self.gui.tab_control.insert(target_index, tab)
                     
                     # Update drag state
                     self.drag_tab_index = target_index
@@ -710,7 +1047,7 @@ class DMXController:
 
     def sync_layouts(self):
         """Synchronize both layouts when positions or angles change"""
-        for i in range(self.num_fixtures):
+        for i in range(len(self.fixtures)):
             if i in self.shared_fixture_positions:
                 pos = self.shared_fixture_positions[i]
                 angle = self.shared_fixture_angles[i]
@@ -734,10 +1071,10 @@ class DMXController:
     def toggle_select_all(self):
         """Toggle selection state of all fixtures"""
         # Check if all fixtures are currently selected
-        all_selected = len(self.selected_fixtures) == self.num_fixtures
+        all_selected = len(self.selected_fixtures) == len(self.fixtures)
         
         # Toggle selection state
-        for i, var in enumerate(self.fixture_vars):
+        for i, var in enumerate(self.gui.fixture_vars):
             var.set(not all_selected)
         
         # Update selected fixtures set
@@ -745,7 +1082,7 @@ class DMXController:
 
     def clear_selection(self):
         """Clear all fixture selections"""
-        for var in self.fixture_vars:
+        for var in self.gui.fixture_vars:
             var.set(False)
         self.update_selected_fixtures()
 
@@ -755,7 +1092,7 @@ class DMXController:
             return  # No fixtures selected
             
         # Get fade time in seconds
-        fade_time = self.fade_time.get()
+        fade_time = self.gui.fade_time.get()
         
         # Calculate number of steps (10Hz update rate)
         steps = int(fade_time * 10)  # 10 steps per second
@@ -768,16 +1105,16 @@ class DMXController:
         has_changes = False  # Flag to track if there are any changes to fade
         
         for fixture in self.selected_fixtures:
-            start_idx = fixture * self.channels_per_fixture
+            start_idx = self.fixtures[fixture].start_address - 1
             
             # Get current DMX values from actual DMX output
-            start_values[fixture] = self.dmx_values[start_idx:start_idx + self.channels_per_fixture].copy()
+            start_values[fixture] = self.dmx_values[start_idx:start_idx + self.fixtures[fixture].num_channels].copy()
             
             # Get target values from current frame
-            target_values[fixture] = self.frames[self.current_frame][start_idx:start_idx + self.channels_per_fixture].copy()
+            target_values[fixture] = self.frames[self.current_frame][start_idx:start_idx + self.fixtures[fixture].num_channels].copy()
             
             # Check if there are any differences between start and target values
-            for i in range(self.channels_per_fixture):
+            for i in range(self.fixtures[fixture].num_channels):
                 if abs(start_values[fixture][i] - target_values[fixture][i]) > 0:
                     has_changes = True
         
@@ -789,7 +1126,7 @@ class DMXController:
         self.start_fade(start_values, target_values, list(self.selected_fixtures), steps)
         
         # Disable fade button during fade
-        self.fade_button.config(state="disabled")
+        self.gui.fade_button.config(state="disabled")
 
     def start_fade(self, start_values, target_values, selected_fixtures, steps):
         """Start a fade operation"""
@@ -822,7 +1159,7 @@ class DMXController:
         
         if current_step > total_steps:
             # Fade complete
-            self.fade_button.config(state="normal")
+            self.gui.fade_button.config(state="normal")
             self._fade_in_progress = False
             self._fade_state = None
             
@@ -883,12 +1220,14 @@ class DMXController:
                 current_values.append(value)
             
             # Update DMX values for this fixture
-            start_idx = fixture * self.channels_per_fixture
+            start_idx = self.fixtures[fixture].start_address - 1
+            
+            # Queue all updates through the update manager first
+            self.update_manager.queue_multi_update(start_idx, current_values)
+            
+            # Then update our local copy
             for j, value in enumerate(current_values):
                 self.dmx_values[start_idx + j] = value
-            
-            # Queue the updates through the update manager
-            self.update_manager.queue_multi_update(start_idx, current_values)
             
             # Get RGB values for this fixture for visualization
             r = current_values[1]  # Red channel
@@ -897,9 +1236,8 @@ class DMXController:
             w = current_values[4]  # White channel
             color = f'#{r:02x}{g:02x}{b:02x}'
             
-            # DIRECT update to DMX layout visualization
+            # Update DMX layout visualization
             try:
-                # Update DMX layout (output visualization)
                 if fixture in self.dmx_layout.fixture_positions:
                     self.dmx_layout.fixture_colors[fixture] = color
                     white_color = f'#{w:02x}{w:02x}{w:02x}'
@@ -921,11 +1259,15 @@ class DMXController:
             self._process_fade_step(step)
 
     def periodic_live_track_update(self):
-        if self.live_track.get():
+        """Periodically update DMX values for live tracking"""
+        if self.gui.live_track.get():
             for fixture in self.selected_fixtures:
-                start_idx = fixture * self.channels_per_fixture
-                values = [self.dmx_values[start_idx + ch] for ch in range(self.channels_per_fixture)]
+                start_idx = self.fixtures[fixture].start_address - 1
+                # Get current values from our local copy
+                values = [self.dmx_values[start_idx + ch] for ch in range(self.fixtures[fixture].num_channels)]
+                # Queue updates through the update manager
                 self.update_manager.queue_multi_update(start_idx, values)
+        # Schedule next update
         self.root.after(50, self.periodic_live_track_update)  # 20Hz, safe for UI, DMX throttled to 10Hz
 
     def on_master_dimmer_change(self, value):
@@ -934,9 +1276,8 @@ class DMXController:
         self.update_manager.set_master_dimmer(value)
         
         # Force a resend of all current values
-        for i in range(0, len(self.dmx_values), self.channels_per_fixture):
-            values = self.dmx_values[i:i + self.channels_per_fixture]
-            self.update_manager.queue_multi_update(i, values)
+        for i in range(len(self.dmx_values)):
+            self.update_manager.queue_update(i, self.dmx_values[i])
 
 if __name__ == "__main__":
     root = tk.Tk()
