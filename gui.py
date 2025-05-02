@@ -486,7 +486,39 @@ class DMXControllerGUI(ttk.Frame):
         self.master_dimmer = MasterDimmer(dmx_stage_frame)
         self.master_dimmer.grid(row=0, column=1, padx=5, pady=5, sticky="n")
         self.master_dimmer.callback = self.dmx_controller.on_master_dimmer_change
+
+        # Add Time Unit slider next to master dimmer
+        time_unit_frame = ttk.Frame(dmx_stage_frame)
+        time_unit_frame.grid(row=0, column=2, padx=5, pady=5, sticky="n")
         
+        ttk.Label(time_unit_frame, text="Time Unit").grid(row=0, column=0, pady=(0, 5))
+        self.time_unit = tk.DoubleVar(value=1.0)  # Default 1 second
+        time_unit_slider = ttk.Scale(
+            time_unit_frame,
+            from_=0.1,
+            to=15.0,  # Changed from 10.0 to 15.0
+            orient="vertical",
+            variable=self.time_unit
+        )
+        time_unit_slider.grid(row=1, column=0, padx=5, pady=5)
+        
+        # Add Time Unit label
+        self.time_unit_label = ttk.Label(time_unit_frame, text="1.0s")
+        self.time_unit_label.grid(row=2, column=0, pady=(5, 0))
+
+        # Add tap button
+        self.tap_button = ttk.Button(
+            time_unit_frame,
+            text="Tap",
+            command=self.on_tap_button
+        )
+        self.tap_button.grid(row=3, column=0, pady=(5, 0))
+        
+        # Initialize tap timing variables
+        self.last_tap_time = None
+        self.tap_timeout = 15.0  # Reset tap after 15 seconds of no taps (matches slider max)
+        self.tap_timeout_id = None  # Store the timeout ID
+
         # Set callbacks
         self.frame_layout.callback = self.dmx_controller.on_fixture_click
         self.dmx_layout.callback = self.dmx_controller.on_fixture_click
@@ -570,25 +602,45 @@ class DMXControllerGUI(ttk.Frame):
         )
         self.fade_button.grid(row=0, column=0, padx=5)
 
-        # Add Fade Time slider
-        self.fade_time = tk.DoubleVar(value=2.0)  # Default 2 seconds
-        fade_slider = ttk.Scale(
+        # Add Fade Time slider (now logarithmic)
+        ttk.Label(fade_frame, text="Fade Units:").grid(row=0, column=1, padx=5)
+        
+        # Create logarithmic scale values
+        log_values = [1/16, 1/8, 1/4, 1/2, 1, 2, 4, 8, 16]
+        self.fade_time = tk.IntVar(value=4)  # Default to index 4 (1 unit)
+        
+        log_scale = ttk.Scale(
             fade_frame,
-            from_=0.1,
-            to=10.0,
+            from_=0,  # Index into log_values
+            to=len(log_values) - 1,
             orient="horizontal",
             variable=self.fade_time
         )
-        fade_slider.grid(row=0, column=1, padx=5, sticky="ew")
+        log_scale.grid(row=0, column=2, padx=5, sticky="ew")
 
         # Add Fade Time label
-        self.fade_time_label = ttk.Label(fade_frame, text="2.0s")
-        self.fade_time_label.grid(row=0, column=2, padx=5)
+        self.fade_time_label = ttk.Label(fade_frame, text="1.0 units")
+        self.fade_time_label.grid(row=0, column=3, padx=5)
+
+        # Update time unit label when slider changes
+        def update_time_unit_label(val):
+            self.time_unit_label.configure(text=f"{float(val):.1f}s")
+            # Update fade time label to show actual duration
+            fade_units = log_values[self.fade_time.get()]
+            total_time = fade_units * float(val)
+            self.fade_time_label.configure(text=f"{fade_units:.2f} units ({total_time:.1f}s)")
+        time_unit_slider.configure(command=update_time_unit_label)
 
         # Update fade time label when slider changes
         def update_fade_label(val):
-            self.fade_time_label.configure(text=f"{float(val):.1f}s")
-        fade_slider.configure(command=update_fade_label)
+            fade_units = log_values[int(float(val))]
+            time_unit = self.time_unit.get()
+            total_time = fade_units * time_unit
+            self.fade_time_label.configure(text=f"{fade_units:.2f} units ({total_time:.1f}s)")
+        log_scale.configure(command=update_fade_label)
+
+        # Set initial fade time to 1 unit (index 4 in log_values)
+        self.fade_time.set(4)
 
         # Create right frame for controls
         right_frame = ttk.Frame(main_frame)
@@ -692,3 +744,44 @@ class DMXControllerGUI(ttk.Frame):
             slider.grid(row=i, column=1, padx=5, pady=2, sticky="ew")
             value_label = ttk.Label(parent, textvariable=value)
             value_label.grid(row=i, column=2, padx=5) 
+
+    def on_tap_button(self):
+        """Handle tap button clicks to set time unit"""
+        current_time = time.time()
+        
+        if self.last_tap_time is None:
+            # First tap
+            self.last_tap_time = current_time
+            self.tap_button.configure(text="Tap again...")
+            # Cancel any existing timeout
+            if self.tap_timeout_id is not None:
+                self.dmx_controller.root.after_cancel(self.tap_timeout_id)
+            # Schedule timeout to reset if no second tap
+            self.tap_timeout_id = self.dmx_controller.root.after(int(self.tap_timeout * 1000), self.reset_tap)
+        else:
+            # Second tap - calculate time difference
+            time_diff = current_time - self.last_tap_time
+            if time_diff <= self.tap_timeout:
+                # Only update if within timeout period
+                # Clamp the value between slider min and max
+                time_diff = max(0.1, min(15.0, time_diff))  # Changed from 10.0 to 15.0
+                self.time_unit.set(time_diff)
+                self.time_unit_label.configure(text=f"{time_diff:.1f}s")
+                # Update fade time label
+                log_values = [1/16, 1/8, 1/4, 1/2, 1, 2, 4, 8, 16]
+                fade_units = log_values[self.fade_time.get()]
+                total_time = fade_units * time_diff
+                self.fade_time_label.configure(text=f"{fade_units:.2f} units ({total_time:.1f}s)")
+            
+            # Cancel the timeout since we've completed the tap sequence
+            if self.tap_timeout_id is not None:
+                self.dmx_controller.root.after_cancel(self.tap_timeout_id)
+                self.tap_timeout_id = None
+            # Reset tap state
+            self.reset_tap()
+
+    def reset_tap(self):
+        """Reset tap button state"""
+        self.last_tap_time = None
+        self.tap_button.configure(text="Tap")
+        self.tap_timeout_id = None 

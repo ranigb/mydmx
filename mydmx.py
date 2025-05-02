@@ -1091,8 +1091,13 @@ class DMXController:
         if not self.selected_fixtures:
             return  # No fixtures selected
             
-        # Get fade time in seconds
-        fade_time = self.gui.fade_time.get()
+        # Get fade time in units and time unit scale
+        log_values = [1/16, 1/8, 1/4, 1/2, 1, 2, 4, 8, 16]
+        fade_units = log_values[self.gui.fade_time.get()]  # Now using IntVar directly
+        time_unit = self.gui.time_unit.get()
+        
+        # Calculate total fade time in seconds
+        fade_time = fade_units * time_unit
         
         # Calculate number of steps (10Hz update rate)
         steps = int(fade_time * 10)  # 10 steps per second
@@ -1234,20 +1239,28 @@ class DMXController:
             g = current_values[2]  # Green channel
             b = current_values[3]  # Blue channel
             w = current_values[4]  # White channel
-            color = f'#{r:02x}{g:02x}{b:02x}'
+            
+            # Apply dimmer to RGB values for visualization only
+            dimmer = current_values[0]  # Dimmer channel
+            dimmer_factor = dimmer / 255.0
+            r_vis = int(r * dimmer_factor)
+            g_vis = int(g * dimmer_factor)
+            b_vis = int(b * dimmer_factor)
+            w_vis = int(w * dimmer_factor)
+            
+            # Convert to hex color with proper formatting
+            color = f'#{r_vis:02x}{g_vis:02x}{b_vis:02x}'
             
             # Update DMX layout visualization
-            try:
-                if fixture in self.dmx_layout.fixture_positions:
-                    self.dmx_layout.fixture_colors[fixture] = color
-                    white_color = f'#{w:02x}{w:02x}{w:02x}'
-                    for item in self.dmx_layout.find_withtag(f'fixture_{fixture}'):
-                        if self.dmx_layout.type(item) == 'rectangle':
-                            self.dmx_layout.itemconfig(item, fill=white_color)
-                        elif self.dmx_layout.type(item) == 'polygon':
-                            self.dmx_layout.itemconfig(item, fill=color)
-            except Exception as e:
-                pass
+            self.gui.dmx_layout.update_fixture_color(fixture, color, w_vis)
+            
+            # Update frame layout visualization
+            self.gui.frame_layout.update_fixture_color(fixture, color, w_vis)
+            
+            # Update color indicators
+            if fixture < len(self.gui.color_indicators):
+                self.gui.color_indicators[fixture].itemconfig(1, fill=f'#{w_vis:02x}{w_vis:02x}{w_vis:02x}')
+                self.gui.color_indicators[fixture].itemconfig(2, fill=color)
         
         # Force UI update to ensure visualization is updated
         self.root.update()
