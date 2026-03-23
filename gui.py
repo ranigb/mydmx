@@ -513,6 +513,26 @@ class DMXControllerGUI(ttk.Frame):
             command=self.on_tap_button
         )
         self.tap_button.grid(row=3, column=0, pady=(5, 0))
+
+        # Add sequence start button and fade checkbox in a frame
+        sequence_control_frame = ttk.Frame(time_unit_frame)
+        sequence_control_frame.grid(row=4, column=0, pady=(5, 0))
+
+        self.sequence_button = ttk.Button(
+            sequence_control_frame,
+            text="Sequence Start",
+            command=self.dmx_controller.toggle_sequence
+        )
+        self.sequence_button.grid(row=0, column=0, padx=(0, 5))
+
+        # Add fade transition checkbox
+        self.sequence_fade_var = tk.BooleanVar(value=False)
+        self.sequence_fade_cb = ttk.Checkbutton(
+            sequence_control_frame,
+            text="Fade",
+            variable=self.sequence_fade_var
+        )
+        self.sequence_fade_cb.grid(row=0, column=1)
         
         # Initialize tap timing variables
         self.last_tap_time = None

@@ -67,8 +67,9 @@ class DMXController:
         self.pending_changes = False  # Flag to track if changes need to be sent
         self.last_dmx_send = 0  # Time of last DMX send
         
-        # Add dictionary to store selected fixtures for each frame
+        # Add dictionary to store selected fixtures and channels for each frame
         self.frame_selections = {}  # Dictionary to store selected fixtures for each frame
+        self.frame_channel_selections = {}  # Dictionary to store selected channels for each frame
         
         # Create GUI
         self.gui = DMXControllerGUI(root, self)
@@ -98,6 +99,11 @@ class DMXController:
         
         # Flag to track if DMX values match frame values
         self.dmx_matches_frame = False
+
+        # Add sequence-related attributes
+        self._sequence_running = False
+        self._sequence_timeout_id = None
+        self._sequence_frame_index = 0
 
     def create_widgets(self):
         # Create main container
@@ -560,8 +566,9 @@ class DMXController:
         self.gui.tab_control.add(frame, text=frame_name)
         self.gui.tab_control.select(frame)  # Select the new tab
         
-        # Initialize empty selection set for new frame
+        # Initialize empty selection sets for new frame
         self.frame_selections[frame_name] = set()
+        self.frame_channel_selections[frame_name] = [True] * len(self.gui.channel_selections)
 
     def show_tab_menu(self, event):
         """Show context menu for tab operations"""
@@ -616,6 +623,7 @@ class DMXController:
             if frame_name in self.frames:
                 self.frames[new_name] = self.frames.pop(frame_name)
                 self.frame_selections[new_name] = self.frame_selections.pop(frame_name)
+                self.frame_channel_selections[new_name] = self.frame_channel_selections.pop(frame_name)
                 if self.current_frame == frame_name:
                     self.current_frame = new_name
 
@@ -637,7 +645,8 @@ class DMXController:
             # Remove from frames dictionary and selections
             if frame_name in self.frames:
                 del self.frames[frame_name]
-                del self.frame_selections[frame_name]  # Remove stored selections
+                del self.frame_selections[frame_name]
+                del self.frame_channel_selections[frame_name]
                 # Switch to default frame if needed
                 if self.current_frame == frame_name:
                     self.current_frame = "Frame 1"
@@ -656,6 +665,7 @@ class DMXController:
         if frame_name in self.frames:
             self.frames[new_name] = self.frames[frame_name].copy()
             self.frame_selections[new_name] = self.frame_selections.get(frame_name, set()).copy()
+            self.frame_channel_selections[new_name] = self.frame_channel_selections.get(frame_name, [True] * len(self.gui.channel_selections)).copy()
             # Create new tab
             self.create_frame_tab(new_name)
             # Switch to the new frame
@@ -692,7 +702,8 @@ class DMXController:
             start_channel = self.fixtures[fixture].start_address - 1
             for channel in range(self.fixtures[fixture].num_channels):
                 # Update slider values only
-                self.gui.channel_values[channel].set(frame_values[start_channel + channel])
+                if channel < len(self.gui.channel_values):
+                    self.gui.channel_values[channel].set(frame_values[start_channel + channel])
         
         # Update frame layout visualization
         self.update_frame_layout(frame_values)
@@ -701,9 +712,8 @@ class DMXController:
         if apply_values:
             # Update DMX values and send to output
             self.dmx_values = frame_values.copy()
-            # Queue the updates through the update manager
-            for i in range(len(frame_values)):
-                self.update_manager.queue_update(self.fixtures[i].start_address + i, frame_values[i])
+            # Queue the entire frame update
+            self.update_manager.queue_multi_update(0, frame_values)
             # Update DMX layout visualization
             self.update_dmx_layout(self.dmx_values)
             self.dmx_matches_frame = True
@@ -737,44 +747,59 @@ class DMXController:
 
     def apply_current_values(self):
         """Apply current frame values to DMX output"""
+        # Get current fixture and channel selections
         selected = {i for i, var in enumerate(self.gui.fixture_vars) if var.get()}
+        channel_selections = [var.get() for var in self.gui.channel_selections]
         
         if not selected:
             return
         
+        # Create a copy of current DMX values
+        new_values = self.dmx_values.copy()
+        
+        # Update values for selected fixtures and channels
         for fixture in selected:
             start_idx = self.fixtures[fixture].start_address - 1
-            values = []
             for channel in range(self.fixtures[fixture].num_channels):
                 # Only include values for selected channels
-                if channel < len(self.gui.channel_selections) and self.gui.channel_selections[channel].get():
-                    values.append(self.frames[self.current_frame][start_idx + channel])
-                else:
-                    values.append(None)  # Use None to indicate no change
-            
-            # Queue the updates through the update manager
-            self.update_manager.queue_multi_update(start_idx, values)
+                if channel < len(channel_selections) and channel_selections[channel]:
+                    new_values[start_idx + channel] = self.frames[self.current_frame][start_idx + channel]
+        
+        # Update our local copy
+        self.dmx_values = new_values
+        
+        # Queue the entire frame update
+        self.update_manager.queue_multi_update(0, new_values)
+        
+        # Update DMX layout visualization
+        self.update_dmx_layout(new_values)
 
     def apply_frame(self, frame_name):
         """Apply the current frame's values to the DMX device, but only for selected fixtures"""
         if frame_name in self.frames:
-            # Use the current selection state from the checkboxes
-            selected = {i for i, var in enumerate(self.fixture_vars) if var.get()}
+            # Use the stored selection state for this frame
+            selected = self.frame_selections.get(frame_name, set())
+            channel_selections = self.frame_channel_selections.get(frame_name, [True] * len(self.gui.channel_selections))
             
             if not selected:  # If no fixtures are selected, do nothing
                 return
             
-            # Only update DMX values for currently selected fixtures
+            # Create a copy of current DMX values
+            new_values = self.dmx_values.copy()
+            
+            # Update values for selected fixtures
             for fixture in selected:
                 start_idx = self.fixtures[fixture].start_address - 1
-                values = []
                 for channel in range(self.fixtures[fixture].num_channels):
-                    # Get value from frame
-                    value = self.frames[frame_name][start_idx + channel]
-                    # Queue the update through the update manager
-                    self.update_manager.queue_update(start_idx + channel, value)
-                    # Update our local copy after queueing
-                    self.dmx_values[start_idx + channel] = value
+                    # Only update selected channels
+                    if channel < len(channel_selections) and channel_selections[channel]:
+                        new_values[start_idx + channel] = self.frames[frame_name][start_idx + channel]
+            
+            # Update our local copy
+            self.dmx_values = new_values
+            
+            # Queue the entire frame update
+            self.update_manager.queue_multi_update(0, new_values)
 
     def update_dmx_layout(self, values):
         """Update the DMX output layout with current values"""
@@ -787,18 +812,11 @@ class DMXController:
             b = values[start_idx + self.CHANNEL_BLUE]        # Blue channel (Channel 4)
             w = values[start_idx + self.CHANNEL_WHITE]       # White channel (Channel 5)
             
-            # Apply dimmer to RGB values for visualization only
-            dimmer_factor = dimmer / 255.0
-            r_vis = int(r * dimmer_factor)
-            g_vis = int(g * dimmer_factor)
-            b_vis = int(b * dimmer_factor)
-            w_vis = int(w * dimmer_factor)
-            
             # Convert to hex color with proper formatting
-            color = f'#{r_vis:02x}{g_vis:02x}{b_vis:02x}'
+            color = f'#{r:02x}{g:02x}{b:02x}'
             
             # Update DMX layout fixture color
-            self.gui.dmx_layout.update_fixture_color(i, color, w_vis)
+            self.gui.dmx_layout.update_fixture_color(i, color, w)
 
     def on_tab_changed(self, event):
         """Handle tab change event"""
@@ -806,6 +824,10 @@ class DMXController:
         if self.current_frame in self.frames:
             self.frames[self.current_frame] = self.dmx_values.copy()
             self.frame_selections[self.current_frame] = self.selected_fixtures.copy()
+            # Save channel selections
+            self.frame_channel_selections[self.current_frame] = [
+                var.get() for var in self.gui.channel_selections
+            ]
         
         # Get the new frame name
         tab = self.gui.tab_control.select()
@@ -814,30 +836,41 @@ class DMXController:
         # Load the new frame's values without sending to DMX
         self.load_frame(frame_name, apply_values=False)
         
-        # Restore fixture selections for this frame
+        # Restore fixture and channel selections for this frame
         self.restore_frame_selections(frame_name)
 
     def restore_frame_selections(self, frame_name):
-        """Restore the fixture selections for a frame"""
+        """Restore the fixture and channel selections for a frame"""
         # Get the saved selections for this frame, or empty set if none
-        saved_selections = self.frame_selections.get(frame_name, set())
+        saved_fixtures = self.frame_selections.get(frame_name, set())
+        saved_channels = self.frame_channel_selections.get(frame_name, [True] * len(self.gui.channel_selections))
         
-        # Update checkboxes to match saved selections
+        # Update fixture checkboxes to match saved selections
         for i, var in enumerate(self.gui.fixture_vars):
-            var.set(i in saved_selections)
+            var.set(i in saved_fixtures)
+        
+        # Update channel checkboxes to match saved selections
+        for i, var in enumerate(self.gui.channel_selections):
+            if i < len(saved_channels):
+                var.set(saved_channels[i])
         
         # Update selected fixtures set
-        self.selected_fixtures = saved_selections.copy()
+        self.selected_fixtures = saved_fixtures.copy()
 
     def update_color_indicators(self):
         """Update the color indicators for all fixtures"""
+        if not self.current_frame or self.current_frame not in self.frames:
+            return
+            
+        frame_values = self.frames[self.current_frame]
+        
         for i in range(len(self.fixtures)):
-            # Get RGB values for this fixture
+            # Get RGB values for this fixture from the current frame
             start_idx = self.fixtures[i].start_address - 1
-            r = self.dmx_values[start_idx + 1]  # Red channel
-            g = self.dmx_values[start_idx + 2]  # Green channel
-            b = self.dmx_values[start_idx + 3]  # Blue channel
-            w = self.dmx_values[start_idx + 4]  # White channel
+            r = frame_values[start_idx + 1]  # Red channel
+            g = frame_values[start_idx + 2]  # Green channel
+            b = frame_values[start_idx + 3]  # Blue channel
+            w = frame_values[start_idx + 4]  # White channel
             
             # Convert to hex color
             color = f'#{r:02x}{g:02x}{b:02x}'
@@ -1092,12 +1125,16 @@ class DMXController:
 
     def fade_in_values(self):
         """Fade in the selected fixtures from current to target values"""
-        if not self.selected_fixtures:
+        # Get current fixture and channel selections
+        selected = {i for i, var in enumerate(self.gui.fixture_vars) if var.get()}
+        channel_selections = [var.get() for var in self.gui.channel_selections]
+        
+        if not selected:
             return  # No fixtures selected
             
         # Get fade time in units and time unit scale
         log_values = [1/16, 1/8, 1/4, 1/2, 1, 2, 4, 8, 16]
-        fade_units = log_values[self.gui.fade_time.get()]  # Now using IntVar directly
+        fade_units = log_values[self.gui.fade_time.get()]
         time_unit = self.gui.time_unit.get()
         
         # Calculate total fade time in seconds
@@ -1113,7 +1150,7 @@ class DMXController:
         target_values = {}
         has_changes = False  # Flag to track if there are any changes to fade
         
-        for fixture in self.selected_fixtures:
+        for fixture in selected:
             start_idx = self.fixtures[fixture].start_address - 1
             
             # Get current DMX values from actual DMX output
@@ -1122,7 +1159,7 @@ class DMXController:
             # Get target values from current frame, but only for selected channels
             target_values[fixture] = []
             for channel in range(self.fixtures[fixture].num_channels):
-                if channel < len(self.gui.channel_selections) and self.gui.channel_selections[channel].get():
+                if channel < len(channel_selections) and channel_selections[channel]:
                     target_values[fixture].append(self.frames[self.current_frame][start_idx + channel])
                 else:
                     # Keep current value for unselected channels
@@ -1130,7 +1167,7 @@ class DMXController:
             
             # Check if there are any differences between start and target values
             for i in range(self.fixtures[fixture].num_channels):
-                if i < len(self.gui.channel_selections) and self.gui.channel_selections[i].get():
+                if i < len(channel_selections) and channel_selections[i]:
                     if abs(start_values[fixture][i] - target_values[fixture][i]) > 0:
                         has_changes = True
         
@@ -1139,7 +1176,7 @@ class DMXController:
             return
             
         # Start the fade
-        self.start_fade(start_values, target_values, list(self.selected_fixtures), steps)
+        self.start_fade(start_values, target_values, list(selected), steps)
         
         # Disable fade button during fade
         self.gui.fade_button.config(state="disabled")
@@ -1181,6 +1218,10 @@ class DMXController:
             
             # Restore the original callback
             self.update_manager.on_frame_sent = self._original_callback
+            
+            # If this was a sequence fade, schedule the next frame
+            if fade.get("is_sequence", False) and self._sequence_running:
+                self._advance_sequence()
             return
         
         # Calculate time between steps for accurate timing
@@ -1214,6 +1255,9 @@ class DMXController:
         selected_fixtures = fade["selected_fixtures"]
         total_steps = fade["steps"]
         
+        # Create a copy of current DMX values
+        new_values = self.dmx_values.copy()
+        
         # Process each selected fixture
         for fixture in selected_fixtures:
             # Get start and target values for this fixture
@@ -1221,7 +1265,6 @@ class DMXController:
             fixture_target = target_values[fixture]
             
             # Calculate values for current step (direct linear interpolation)
-            current_values = []
             for i in range(len(fixture_start)):
                 # Linear interpolation between start and target
                 if step >= total_steps:  # Final step or beyond
@@ -1233,26 +1276,19 @@ class DMXController:
                     value = fixture_start[i] + (percentage * (fixture_target[i] - fixture_start[i]))
                 # Ensure value is valid (0-255) and an integer
                 value = max(0, min(255, int(round(value))))
-                current_values.append(value)
-            
-            # Update DMX values for this fixture
-            start_idx = self.fixtures[fixture].start_address - 1
-            
-            # Queue all updates through the update manager first
-            self.update_manager.queue_multi_update(start_idx, current_values)
-            
-            # Then update our local copy
-            for j, value in enumerate(current_values):
-                self.dmx_values[start_idx + j] = value
+                # Update the new values array
+                start_idx = self.fixtures[fixture].start_address - 1
+                new_values[start_idx + i] = value
             
             # Get RGB values for this fixture for visualization
-            r = current_values[1]  # Red channel
-            g = current_values[2]  # Green channel
-            b = current_values[3]  # Blue channel
-            w = current_values[4]  # White channel
+            start_idx = self.fixtures[fixture].start_address - 1
+            r = new_values[start_idx + 1]  # Red channel
+            g = new_values[start_idx + 2]  # Green channel
+            b = new_values[start_idx + 3]  # Blue channel
+            w = new_values[start_idx + 4]  # White channel
             
             # Apply dimmer to RGB values for visualization only
-            dimmer = current_values[0]  # Dimmer channel
+            dimmer = new_values[start_idx]  # Dimmer channel
             dimmer_factor = dimmer / 255.0
             r_vis = int(r * dimmer_factor)
             g_vis = int(g * dimmer_factor)
@@ -1272,6 +1308,12 @@ class DMXController:
             if fixture < len(self.gui.color_indicators):
                 self.gui.color_indicators[fixture].itemconfig(1, fill=f'#{w_vis:02x}{w_vis:02x}{w_vis:02x}')
                 self.gui.color_indicators[fixture].itemconfig(2, fill=color)
+        
+        # Update our local copy
+        self.dmx_values = new_values
+        
+        # Queue the entire frame update
+        self.update_manager.queue_multi_update(0, new_values)
         
         # Force UI update to ensure visualization is updated
         self.root.update()
@@ -1296,12 +1338,157 @@ class DMXController:
 
     def on_master_dimmer_change(self, value):
         """Handle master dimmer slider changes"""
+        # Update master dimmer value
+        self.master_dimmer = value
+        
         # Update master dimmer value in the update manager
         self.update_manager.set_master_dimmer(value)
         
-        # Force a resend of all current values
-        for i in range(len(self.dmx_values)):
-            self.update_manager.queue_update(i, self.dmx_values[i])
+        # Create a copy of current DMX values
+        new_values = self.dmx_values.copy()
+        
+        # Apply master dimmer to all values
+        for i in range(len(new_values)):
+            new_values[i] = int(new_values[i] * value)
+        
+        # Queue the entire frame update
+        self.update_manager.queue_multi_update(0, new_values)
+        
+        # Update DMX layout visualization
+        self.update_dmx_layout(new_values)
+
+    def toggle_sequence(self):
+        """Toggle sequence playback on/off"""
+        if self._sequence_running:
+            # Stop sequence
+            self._sequence_running = False
+            if self._sequence_timeout_id:
+                self.root.after_cancel(self._sequence_timeout_id)
+                self._sequence_timeout_id = None
+            self.gui.sequence_button.configure(text="Sequence Start")
+        else:
+            # Start sequence
+            self._sequence_running = True
+            self._sequence_frame_index = 0
+            self.gui.sequence_button.configure(text="Sequence Stop")
+            # Start with the first frame
+            self._advance_sequence()
+
+    def _advance_sequence(self):
+        """Advance to the next frame in the sequence"""
+        if not self._sequence_running:
+            return
+
+        # Get all frame names in order
+        frame_names = list(self.frames.keys())
+        if not frame_names:
+            return
+
+        # Calculate duration based on fade units and time unit
+        log_values = [1/16, 1/8, 1/4, 1/2, 1, 2, 4, 8, 16]
+        fade_units = log_values[self.gui.fade_time.get()]
+        time_unit = self.gui.time_unit.get()
+        duration = fade_units * time_unit
+
+        # Get current and next frame names
+        current_frame = frame_names[self._sequence_frame_index]
+        next_frame_index = (self._sequence_frame_index + 1) % len(frame_names)
+        next_frame = frame_names[next_frame_index]
+        
+        # Move to next frame index
+        self._sequence_frame_index = next_frame_index
+        
+        # Get stored selections for next frame
+        selected = self.frame_selections.get(next_frame, set())
+        channel_selections = self.frame_channel_selections.get(next_frame, [True] * len(self.gui.channel_selections))
+        
+        if not selected:
+            # If no fixtures selected for next frame, just schedule next transition
+            self._sequence_timeout_id = self.root.after(int(duration * 1000), self._advance_sequence)
+            return
+        
+        if self.gui.sequence_fade_var.get():
+            # Use fade transition
+            # Store start values (current DMX output) and target values (from next frame)
+            start_values = {}
+            target_values = {}
+            has_changes = False
+            
+            for fixture in selected:
+                start_idx = self.fixtures[fixture].start_address - 1
+                
+                # Get current DMX values
+                start_values[fixture] = self.dmx_values[start_idx:start_idx + self.fixtures[fixture].num_channels].copy()
+                
+                # Get target values from next frame, but only for selected channels
+                target_values[fixture] = []
+                for channel in range(self.fixtures[fixture].num_channels):
+                    if channel < len(channel_selections) and channel_selections[channel]:
+                        target_values[fixture].append(self.frames[next_frame][start_idx + channel])
+                    else:
+                        # Keep current value for unselected channels
+                        target_values[fixture].append(self.dmx_values[start_idx + channel])
+                
+                # Check if there are any differences between start and target values
+                for i in range(self.fixtures[fixture].num_channels):
+                    if i < len(channel_selections) and channel_selections[i]:
+                        if abs(start_values[fixture][i] - target_values[fixture][i]) > 0:
+                            has_changes = True
+            
+            # If there are no changes to make, just schedule next frame
+            if not has_changes:
+                self._sequence_timeout_id = self.root.after(int(duration * 1000), self._advance_sequence)
+                return
+                
+            # Calculate number of steps (10Hz update rate)
+            steps = int(duration * 10)  # 10 steps per second
+            if steps < 1:
+                steps = 1
+                
+            # Store fade state for the sequence
+            self._fade_in_progress = True
+            self._fade_state = {
+                "start_values": start_values,
+                "target_values": target_values,
+                "selected_fixtures": list(selected),
+                "step": 0,
+                "steps": steps,
+                "last_update_time": time.time(),
+                "is_sequence": True  # Flag to indicate this is a sequence fade
+            }
+            
+            # Disable automatic DMX layout updates during fade
+            self._original_callback = self.update_manager.on_frame_sent
+            self.update_manager.on_frame_sent = None
+            
+            # Start the fade
+            self._perform_fade_step()
+            
+            # Schedule next frame transition after fade completes
+            self._sequence_timeout_id = self.root.after(int(duration * 1000), self._advance_sequence)
+        else:
+            # Use instant transition
+            # Create a copy of current DMX values
+            new_values = self.dmx_values.copy()
+            
+            # Update values for selected fixtures and channels
+            for fixture in selected:
+                start_idx = self.fixtures[fixture].start_address - 1
+                for channel in range(self.fixtures[fixture].num_channels):
+                    if channel < len(channel_selections) and channel_selections[channel]:
+                        new_values[start_idx + channel] = self.frames[next_frame][start_idx + channel]
+            
+            # Update our local copy
+            self.dmx_values = new_values
+            
+            # Queue the entire frame update
+            self.update_manager.queue_multi_update(0, new_values)
+            
+            # Update DMX layout visualization
+            self.update_dmx_layout(new_values)
+            
+            # Schedule next frame transition
+            self._sequence_timeout_id = self.root.after(int(duration * 1000), self._advance_sequence)
 
 if __name__ == "__main__":
     root = tk.Tk()
