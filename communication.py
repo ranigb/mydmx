@@ -114,3 +114,4 @@ class DMXUpdateManager:
         # Force an update with the new dimmer value
         if self.pending_values is None:
             self.pending_values = self.original_values.copy() 
+
