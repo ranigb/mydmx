@@ -73,6 +73,14 @@ class EngineController:
         return self.sequence_engine.is_paused
 
     @property
+    def is_rhythm_playing(self) -> bool:
+        return self.sequence_engine.is_rhythm_enabled
+
+    @property
+    def rhythm_bpm(self) -> float:
+        return self.sequence_engine.rhythm_bpm
+
+    @property
     def is_fading(self) -> bool:
         return self._fade_state is not None
 
@@ -282,6 +290,18 @@ class EngineController:
 
     def resume_sequence(self) -> None:
         self.sequence_engine.resume()
+
+    def set_rhythm_bpm(self, bpm: float) -> None:
+        self.sequence_engine.set_rhythm_bpm(bpm)
+
+    def start_rhythm_play(self) -> Cue | None:
+        cue = self.sequence_engine.start_rhythm()
+        if cue is not None:
+            self.apply_scene(cue.scene_id, fade_ms=cue.transition.fade_in_ms)
+        return cue
+
+    def stop_rhythm_play(self) -> None:
+        self.sequence_engine.stop_rhythm()
 
     def go_next_cue(self) -> Cue | None:
         cue = self.sequence_engine.go()

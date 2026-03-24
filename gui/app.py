@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -11,6 +12,9 @@ from storage import ShowRepository
 
 STAGE_REFERENCE_WIDTH = 620
 STAGE_REFERENCE_HEIGHT = 360
+RHYTHM_MIN_BPM = 40
+RHYTHM_MAX_BPM = 240
+RHYTHM_TAP_RESET_SECONDS = 2.0
 
 
 class ColorWheel(tk.Canvas):
@@ -322,6 +326,7 @@ class MainApplication(ttk.Frame):
         self.selected_scene_id: str | None = None
         self.selected_sequence_id: str | None = None
         self.sequence_paused = False
+        self._rhythm_tap_times: list[float] = []
         self.scene_order: list[str] = []
         self.sequence_order: list[str] = []
         self.cue_order: list[str] = []
@@ -337,6 +342,7 @@ class MainApplication(ttk.Frame):
         self.sequence_cyclic_var = tk.BooleanVar(value=False)
         self.scene_auto_apply_var = tk.BooleanVar(value=False)
         self.override_auto_apply_var = tk.BooleanVar(value=False)
+        self.rhythm_bpm_var = tk.IntVar(value=int(round(self.controller.rhythm_bpm)))
         self._suspend_editor_callbacks = False
 
         self.scene_editor_vars = self._create_level_vars()
@@ -638,14 +644,34 @@ class MainApplication(ttk.Frame):
         ttk.Button(transport, text="Release Override", command=self._release_override).grid(row=3, column=0, sticky="ew", pady=(0, 6))
         ttk.Button(transport, text="Record Override", command=self._record_override).grid(row=4, column=0, sticky="ew")
 
+        rhythm = ttk.LabelFrame(sidebar, text="Rhythm Play")
+        rhythm.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        rhythm.grid_columnconfigure(0, weight=1)
+        ttk.Label(rhythm, text="Pace (BPM)").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 2))
+        rhythm_entry = ttk.Entry(rhythm, textvariable=self.rhythm_bpm_var, width=8)
+        rhythm_entry.grid(row=1, column=0, sticky="ew", padx=8)
+        rhythm_entry.bind("<Return>", self._commit_rhythm_bpm)
+        rhythm_entry.bind("<FocusOut>", self._commit_rhythm_bpm)
+        ttk.Scale(
+            rhythm,
+            from_=RHYTHM_MIN_BPM,
+            to=RHYTHM_MAX_BPM,
+            orient="horizontal",
+            variable=self.rhythm_bpm_var,
+            command=self._on_rhythm_slider_changed,
+        ).grid(row=2, column=0, sticky="ew", padx=8, pady=(8, 6))
+        ttk.Button(rhythm, text="Tap Tempo", command=self._tap_rhythm_tempo).grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 6))
+        self.rhythm_button = ttk.Button(rhythm, text="Start Rhythm", command=self._toggle_rhythm_play)
+        self.rhythm_button.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 8))
+
         override = ttk.LabelFrame(sidebar, text="Live Override")
-        override.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        override.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         self._build_level_editor(override, self.override_editor_vars)
         ttk.Checkbutton(override, text="Auto-apply editor", variable=self.override_auto_apply_var, command=self._on_override_auto_apply_toggled).grid(row=5, column=0, sticky="w", padx=8, pady=(8, 4))
         ttk.Button(override, text="Apply Override", command=self._apply_show_override).grid(row=6, column=0, sticky="ew", pady=(4, 0))
 
         override_color_frame = ttk.LabelFrame(sidebar, text="Color Wheel")
-        override_color_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        override_color_frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         self.override_color_wheel = ColorWheel(override_color_frame, callback=self._on_override_color_picked, bg="#111821")
         self.override_color_wheel.grid(row=0, column=0, padx=8, pady=8)
 
@@ -709,6 +735,8 @@ class MainApplication(ttk.Frame):
 
         self.transport_status_var.set(self._transport_status_text())
         self.override_status_var.set("Active" if self.controller.state.live_override.active else "None")
+        self.pause_button.configure(text="Resume" if self.controller.is_sequence_paused else "Pause")
+        self.rhythm_button.configure(text="Stop Rhythm" if self.controller.is_rhythm_playing else "Start Rhythm")
 
         live_states = self._live_fixture_display_states()
         self.live_fixture_stage.set_content(self.controller.fixtures, live_states, set())
@@ -1021,6 +1049,7 @@ class MainApplication(ttk.Frame):
             return
         self.controller.load_sequence(self.selected_sequence_id)
         self.sequence_paused = False
+        self._rhythm_tap_times.clear()
         self.pause_button.configure(text="Pause")
 
     def _toggle_selected_sequence_cyclic(self) -> None:
@@ -1070,6 +1099,71 @@ class MainApplication(ttk.Frame):
         else:
             self.controller.resume_sequence()
             self.pause_button.configure(text="Pause")
+
+    def _set_rhythm_bpm(self, bpm: float) -> int:
+        clamped_bpm = max(RHYTHM_MIN_BPM, min(RHYTHM_MAX_BPM, int(round(float(bpm)))))
+        try:
+            current_value = self.rhythm_bpm_var.get()
+        except tk.TclError:
+            current_value = None
+        if current_value != clamped_bpm:
+            self.rhythm_bpm_var.set(clamped_bpm)
+        self.controller.set_rhythm_bpm(clamped_bpm)
+        return clamped_bpm
+
+    def _commit_rhythm_bpm(self, _event=None):
+        try:
+            bpm = self.rhythm_bpm_var.get()
+        except tk.TclError:
+            self.rhythm_bpm_var.set(int(round(self.controller.rhythm_bpm)))
+            return None
+        self._set_rhythm_bpm(bpm)
+        return None
+
+    def _on_rhythm_slider_changed(self, value: str) -> None:
+        self._set_rhythm_bpm(float(value))
+
+    def _tap_rhythm_tempo(self) -> None:
+        now = time.monotonic()
+        if self._rhythm_tap_times and now - self._rhythm_tap_times[-1] > RHYTHM_TAP_RESET_SECONDS:
+            self._rhythm_tap_times.clear()
+        self._rhythm_tap_times.append(now)
+        self._rhythm_tap_times = self._rhythm_tap_times[-5:]
+        if len(self._rhythm_tap_times) < 2:
+            return
+        intervals = [
+            current - previous
+            for previous, current in zip(self._rhythm_tap_times, self._rhythm_tap_times[1:])
+            if current > previous
+        ]
+        if not intervals:
+            return
+        average_interval = sum(intervals) / len(intervals)
+        if average_interval <= 0:
+            return
+        self._set_rhythm_bpm(60.0 / average_interval)
+
+    def _toggle_rhythm_play(self) -> None:
+        loaded_sequence = self.controller.loaded_sequence
+        if loaded_sequence is None:
+            messagebox.showwarning("Rhythm Play", "Load a sequence into show mode before starting rhythm play.")
+            return
+        if not loaded_sequence.cues:
+            messagebox.showwarning("Rhythm Play", "Add at least one cue to the loaded sequence before starting rhythm play.")
+            return
+        if self.controller.is_rhythm_playing:
+            self.controller.stop_rhythm_play()
+            self._refresh_views()
+            return
+        self._commit_rhythm_bpm()
+        if self.controller.is_sequence_paused:
+            self.sequence_paused = False
+            self.controller.resume_sequence()
+        cue = self.controller.start_rhythm_play()
+        if cue is None:
+            messagebox.showwarning("Rhythm Play", "The loaded sequence could not be started.")
+            self.controller.stop_rhythm_play()
+        self._refresh_views()
 
     def _apply_show_override(self) -> None:
         selected_ids = self.show_selected_fixture_ids or ({self.controller.fixtures[0].fixture_id} if self.controller.fixtures else set())
@@ -1212,6 +1306,8 @@ class MainApplication(ttk.Frame):
             return "Fading"
         if self.controller.current_cue is not None and self.controller.is_sequence_paused:
             return "Paused"
+        if self.controller.is_rhythm_playing:
+            return f"Rhythm {int(round(self.controller.rhythm_bpm))} BPM"
         if self.controller.current_cue is not None:
             return "Running"
         if self.controller.loaded_sequence is not None:
